@@ -277,15 +277,18 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", oczen: "OpenCodeZen" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", oczen: "oczen" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", loomy: "Loomy", oczen: "OpenCodeZen" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", loomy: "loomy", oczen: "oczen" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
 // WorkBuddy 国际版不提供手动签到，而是自动对话保活领日活奖励；
-// 千问办公无签到活动；OpenCodeZen 匿名通道无账号概念（也无积分）。
-const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "oczen"]);
+// 千问办公无签到活动；Loomy 无签到端点；OpenCodeZen 匿名通道无账号概念（也无积分）。
+const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "loomy", "oczen"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
+// 导入型渠道：凭据由本机已登录的官方客户端提供，没有浏览器登录流程（见 internal/app/import_local.go）。
+const IMPORT_LOCAL_CHANNELS = new Set(["loomy"]);
+const isImportLocal = (ch) => IMPORT_LOCAL_CHANNELS.has(ch);
 // 无手动签到渠道的状态文案：国际版是「自动领日活奖励」，千问办公为「无签到」。
 const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励", oczen: "不支持" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
@@ -615,15 +618,28 @@ async function refreshAll() {
 
 // ---------- 登录 ----------
 let pendingChannel = null;
+// 待执行动作："login" = 打开浏览器登录，"import" = 从本机客户端导入。
+let pendingAction = "login";
 // 无手动签到渠道的登录提示差异文案（国际版会自动领日活奖励）。
 const NO_CHECKIN_LOGIN_HINT = {
   workbuddyai: "（无需手动签到，定时自动对话保活并领取日活奖励）",
   qwenwork: "（每日积分服务端 00:00 自动发放；若浏览器已登录千问办公则全自动完成，否则需扫码一次）",
+  loomy: "（凭据来自本机已登录的 Loomy 客户端；上游无续期接口，约 14 天后需重新登录并再次导入）",
   glm: "（登录后请按下方指引复制 refresh_token 粘贴回来）",
 };
 function promptLogin(channel) {
   pendingChannel = channel;
   const name = chLabel(channel);
+  pendingAction = isImportLocal(channel) ? "import" : "login";
+  // 纯导入型渠道：文案与动作都不同（读本机客户端凭据，而不是打开浏览器登录）。
+  if (isImportLocal(channel)) {
+    $("lcTitle").textContent = "导入 " + name + " 账号";
+    $("lcMsg").textContent = `将读取本机已登录的${name}客户端凭据并保存到 wild-work（不会修改客户端本身）。`
+      + `若提示未找到凭据，请先打开并登录${name}客户端后重试。${NO_CHECKIN_LOGIN_HINT[channel] || ""}`;
+    $("btnLoginConfirm").textContent = "导入";
+    $("loginConfirmOverlay").classList.remove("hidden");
+    return;
+  }
   $("lcTitle").textContent = "添加 " + name + " 账号";
   $("lcMsg").textContent = noExplicitCheckin(channel)
     ? `点击「登录${name}」将打开浏览器窗口，请按照指示正常登录${name}账号，登录成功后关闭浏览器窗口即可。${NO_CHECKIN_LOGIN_HINT[channel] || ""}`
@@ -633,7 +649,24 @@ function promptLogin(channel) {
 }
 function confirmLogin() {
   $("loginConfirmOverlay").classList.add("hidden");
-  if (pendingChannel) startLogin(pendingChannel);
+  if (!pendingChannel) return;
+  if (pendingAction === "import") importLocal(pendingChannel);
+  else startLogin(pendingChannel);
+}
+
+// importLocal 从本机已登录的官方客户端导入凭据（Loomy）。
+// note 只在有降级时非空（如某个凭据文件没读到）—— 必须显示出来，
+// 否则用户只看到"已导入成功"，等积分不显示时才发现。
+async function importLocal(channel) {
+  try {
+    const r = await api("/api/account/import_local", { channel });
+    const head = `已导入 ${chLabel(channel)} 账号 ${r.uid || ""}`;
+    if (r.note) toast(`${head}。${r.note}`, 8000);
+    else toast(head);
+    await loadState();
+  } catch (e) {
+    toast(e.message);
+  }
 }
 
 async function startLogin(channel) {
@@ -798,7 +831,7 @@ async function toggleAutostart() {
 
 // ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/渠道代理） ----------
 // PROXY_CHANNELS 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
-const PROXY_CHANNELS = ["oczen", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm"];
+const PROXY_CHANNELS = ["oczen", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "loomy"];
 const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", oczen: "OpenCodeZen" };
 
 // renderProxyList 按当前 state.proxies 渲染每渠道一个输入行。
@@ -1154,6 +1187,7 @@ function bind() {
   $("btnAddQoderCN").onclick = () => promptLogin("qodercn");
   $("btnAddQoderCOM").onclick = () => promptLogin("qodercom");
   $("btnAddQwen").onclick = () => promptLogin("qwenwork");
+  $("btnAddLoomy").onclick = () => promptLogin("loomy");
   $("btnAddGLM").onclick = () => startGLMLogin();
   $("btnGLMSubmit").onclick = submitGLMToken;
   $("btnGLMCancel").onclick = cancelGLMLogin;
