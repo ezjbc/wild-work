@@ -20,6 +20,10 @@ import (
 )
 
 // Config 调度器依赖。
+//
+// 三个时间字段的零值语义见 New：nil = 未配置（落默认），
+// []int{} = 本渠道没有这类任务（保持为空）。想关掉某类任务却传 nil，
+// 会被静默补上默认时间并每天空跑。
 type Config struct {
 	Pool           *pool.Pool
 	Upstream       provider.Upstream
@@ -67,8 +71,15 @@ type Scheduler struct {
 }
 
 // New 构建。
+//
+// 零值（nil）与显式空切片语义不同，不可混用：
+//   - nil     = 「未配置」→ 落默认（签到 9:00/21:00，保活 22:00）
+//   - []int{} = 「本渠道没有这类定时任务」→ 保持为空，什么都不跑
+//
+// 用 len(...) == 0 判定会把后者一并兜底成默认时间，导致无签到活动、
+// 无 refresh 端点的渠道每天空跑并记录失败。
 func New(cfg Config) *Scheduler {
-	if len(cfg.CheckinMinutes) == 0 {
+	if cfg.CheckinMinutes == nil {
 		if len(cfg.CheckinHours) > 0 {
 			cfg.CheckinMinutes = make([]int, 0, len(cfg.CheckinHours))
 			for _, h := range cfg.CheckinHours {
@@ -80,7 +91,7 @@ func New(cfg Config) *Scheduler {
 			cfg.CheckinMinutes = []int{9 * 60, 21 * 60}
 		}
 	}
-	if len(cfg.KeepaliveHours) == 0 {
+	if cfg.KeepaliveHours == nil {
 		cfg.KeepaliveHours = []int{22}
 	}
 	if cfg.ExpiringThreshold <= 0 {
@@ -235,11 +246,22 @@ func nextFireMinutes(now time.Time, minutes []int) time.Time {
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		ch, kh := s.schedule()
+		// 该渠道没有任何定时任务（CheckinMinutes/KeepaliveHours 均为显式空切片）：
+		// 直接阻塞等取消或配置变更。此时 nextFireMinutes 返回零值，靠下面的
+		// IsZero 兜底会变成每分钟唤醒一次的空转。
+		if len(ch) == 0 && len(kh) == 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.wake:
+			}
+			continue
+		}
 		all := append(s.fireMinutes(ch), hoursToMinutes(kh)...)
 		next := nextFireMinutes(time.Now(), all)
 		if next.IsZero() {
-			// 无任何待触发时刻（理论上不会：KeepaliveHours 至少 [22]）。
-			// 兑底睡一分钟，避免零值时间导致 time.NewTimer 立即返回造成忙循环。
+			// 无任何待触发时刻（列表非空但全部越界时才会走到这里）：
+			// 兜底睡一分钟，避免零值时间导致 time.NewTimer 立即返回造成忙循环。
 			next = time.Now().Add(time.Minute)
 		}
 		timer := time.NewTimer(time.Until(next))
