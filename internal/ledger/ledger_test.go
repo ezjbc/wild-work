@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -334,5 +335,41 @@ func TestDiffCreditsSameKeyUnchangedNoEvents(t *testing.T) {
 	l.DiffCredits("workbuddy", "u9", 500, cur) // baseline 1 条
 	if n := l.DiffCredits("workbuddy", "u9", 500, cur); n != 0 {
 		t.Fatalf("无变化刷新应零事件，got %d", n)
+	}
+}
+
+// TestQueryEntriesTimeSorted entries 必须按时间升序返回（前端倒序分页依赖此顺序）。
+// months 是 map、range 顺序随机，跨月时会先扫到当月文件把最新条目排到前面；
+// 修复前这里同文件乱序落盘即能复现（返回顺序 = 写入顺序）。
+func TestQueryEntriesTimeSorted(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ledger")
+	l, _ := New(dir)
+	defer l.Close()
+
+	now := time.Now().Unix()
+	// 故意乱序落盘：大 ts 在前、小 ts 在后
+	lines := []CreditEntry{
+		{Ts: now, Ch: "workbuddyai", UID: "u1", Kind: "earn", Amount: 100, Balance: 100},
+		{Ts: now - 3600, Ch: "workbuddyai", UID: "u1", Kind: "spend", Amount: -30, Balance: 70},
+	}
+	f, err := os.OpenFile(filepath.Join(dir, monthFile("credit", time.Now())),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range lines {
+		b, _ := json.Marshal(e)
+		if _, err := f.Write(append(b, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.Close()
+
+	st := l.Query(7, nil)
+	if len(st.Credit.Entries) != 2 {
+		t.Fatalf("entries=%d want 2", len(st.Credit.Entries))
+	}
+	if st.Credit.Entries[0].Ts > st.Credit.Entries[1].Ts {
+		t.Fatalf("entries 未按时间升序：%d > %d", st.Credit.Entries[0].Ts, st.Credit.Entries[1].Ts)
 	}
 }
