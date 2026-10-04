@@ -284,18 +284,23 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", oczen: "OpenCodeZen" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", oczen: "oczen" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "商汤小浣熊", oczen: "OpenCodeZen" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", oczen: "oczen" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
 // WorkBuddy 国际版不提供手动签到，而是自动对话保活领日活奖励；
-// 千问办公无签到活动；MonkeyCode 无签到端点；OpenCodeZen 匿名通道无账号概念（也无积分）。
-const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "monkeycode", "oczen"]);
+// 千问办公无签到活动；MonkeyCode 无签到端点；小浣熊无签到端点；OpenCodeZen 匿名通道无账号概念（也无积分）。
+const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "monkeycode", "raccoon", "oczen"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 // 导入型渠道：凭据由本机已登录的官方客户端提供，没有浏览器登录流程（见 internal/app/import_local.go）。
-const IMPORT_LOCAL_CHANNELS = new Set(["monkeycode"]);
+const IMPORT_LOCAL_CHANNELS = new Set(["monkeycode", "raccoon"]);
 const isImportLocal = (ch) => IMPORT_LOCAL_CHANNELS.has(ch);
+// 支持「浏览器授权登录」的渠道：登录期间临时把该渠道的自定义协议回调指向本工具，
+// 以便接住授权码并完成 token 兑换。
+// 小浣熊两个集合都命中 —— 弹窗里同时给「浏览器授权登录」与「从客户端导入」两个动作。
+const PROTOCOL_LOGIN_CHANNELS = new Set(["raccoon"]);
+const hasProtocolLogin = (ch) => PROTOCOL_LOGIN_CHANNELS.has(ch);
 // 无手动签到渠道的状态文案：国际版是「自动领日活奖励」，千问办公为「无签到」。
 const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励", oczen: "不支持" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
@@ -695,18 +700,40 @@ async function refreshAll() {
 // ---------- 登录 ----------
 let pendingChannel = null;
 // 待执行动作："login" = 打开浏览器登录，"import" = 从本机客户端导入。
+// 小浣熊两种都支持，由弹窗里的两个按钮分别设定。
 let pendingAction = "login";
 // 无手动签到渠道的登录提示差异文案（国际版会自动领日活奖励）。
 const NO_CHECKIN_LOGIN_HINT = {
   workbuddyai: "（无需手动签到，定时自动对话保活并领取日活奖励）",
   qwenwork: "（每日积分服务端 00:00 自动发放；若浏览器已登录千问办公则全自动完成，否则需扫码一次）",
   monkeycode: "（凭据来自本机已登录的 MonkeyCode 客户端；上游无续期接口，客户端重新登录后需再次导入）",
+  raccoon: "（凭据来自本机已登录的小浣熊客户端；access_token 约 2 小时，本工具会自动续期）",
   glm: "（登录后请按下方指引复制 refresh_token 粘贴回来）",
 };
 function promptLogin(channel) {
   pendingChannel = channel;
   const name = chLabel(channel);
   pendingAction = isImportLocal(channel) ? "import" : "login";
+  // 次按钮默认隐藏，只在「两条路都通」的渠道（小浣熊）里显示。
+  const altBtn = $("btnLoginAlt");
+  altBtn.classList.add("hidden");
+  altBtn.onclick = null;
+
+  // 浏览器授权登录渠道：主按钮走浏览器授权 + 协议回调接管，次按钮回退到本机客户端导入。
+  if (hasProtocolLogin(channel)) {
+    pendingAction = "login";
+    $("lcTitle").textContent = "添加 " + name + " 账号";
+    $("lcMsg").textContent = `点击「登录${name}」将打开浏览器授权页，登录完成后本工具会自动接管回调并保存账号。`
+      + `登录期间会把 ${name} 的协议注册临时指向本工具（结束即恢复），请勿在此期间启动${name}客户端，否则协议注册会被它覆盖。`
+      + `也可以改用「从客户端导入」：直接读取本机已登录客户端的凭据。`;
+    $("btnLoginConfirm").textContent = "登录" + name;
+    altBtn.textContent = "从客户端导入";
+    altBtn.classList.remove("hidden");
+    altBtn.onclick = () => { pendingAction = "import"; confirmLogin(); };
+    $("loginConfirmOverlay").classList.remove("hidden");
+    return;
+  }
+
   // 纯导入型渠道：文案与动作都不同（读本机客户端凭据，而不是打开浏览器登录）。
   if (isImportLocal(channel)) {
     $("lcTitle").textContent = "导入 " + name + " 账号";
@@ -726,11 +753,12 @@ function promptLogin(channel) {
 function confirmLogin() {
   $("loginConfirmOverlay").classList.add("hidden");
   if (!pendingChannel) return;
+  // 按 pendingAction 分发：小浣熊两种动作都支持，不能只看渠道是否属于导入型。
   if (pendingAction === "import") importLocal(pendingChannel);
   else startLogin(pendingChannel);
 }
 
-// importLocal 从本机已登录的官方客户端导入凭据（MonkeyCode）。
+// importLocal 从本机已登录的官方客户端导入凭据（MonkeyCode / 小浣熊）。
 // note 只在有降级时非空（如某个凭据文件没读到）—— 必须显示出来，
 // 否则用户只看到"已导入成功"，等积分不显示时才发现。
 async function importLocal(channel) {
@@ -751,7 +779,9 @@ async function startLogin(channel) {
     const url = r.auth_url;
     if (!url) { toast("无法获取登录链接"); return; }
     $("loginTitle").textContent = `添加 ${chLabel(channel)} 账号`;
-    $("loginMsg").textContent = "请在浏览器新窗口中完成登录…";
+    $("loginMsg").textContent = hasProtocolLogin(channel)
+      ? `请在浏览器新窗口中完成${chLabel(channel)}登录；完成后本工具会自动接管回调并保存账号（期间请勿启动${chLabel(channel)}客户端）。`
+      : "请在浏览器新窗口中完成登录…";
     $("loginOverlay").classList.remove("hidden");
     $("btnCopyUrl").dataset.url = url;
     window.open(url, "_blank", "noopener,noreferrer");
@@ -907,7 +937,7 @@ async function toggleAutostart() {
 
 // ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/渠道代理） ----------
 // PROXY_CHANNELS 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
-const PROXY_CHANNELS = ["oczen", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "monkeycode"];
+const PROXY_CHANNELS = ["oczen", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm", "monkeycode", "raccoon"];
 const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", oczen: "OpenCodeZen" };
 
 // renderProxyList 按当前 state.proxies 渲染每渠道一个输入行。
@@ -1264,6 +1294,7 @@ function bind() {
   $("btnAddQoderCOM").onclick = () => promptLogin("qodercom");
   $("btnAddQwen").onclick = () => promptLogin("qwenwork");
   $("btnAddMonkeyCode").onclick = () => promptLogin("monkeycode");
+  $("btnAddRaccoon").onclick = () => promptLogin("raccoon");
   $("btnAddGLM").onclick = () => startGLMLogin();
   $("btnGLMSubmit").onclick = submitGLMToken;
   $("btnGLMCancel").onclick = cancelGLMLogin;

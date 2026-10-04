@@ -28,6 +28,7 @@ import (
 	loginqodercn "wild-work/internal/login_qodercn"
 	loginqodercom "wild-work/internal/login_qodercom"
 	loginqwenwork "wild-work/internal/login_qwenwork"
+	loginraccoon "wild-work/internal/login_raccoon"
 	logintrae "wild-work/internal/login_trae"
 	"wild-work/internal/login_wbai"
 	"wild-work/internal/oczen"
@@ -38,6 +39,7 @@ import (
 	"wild-work/internal/qodercn"
 	"wild-work/internal/qodercom"
 	"wild-work/internal/qwenwork"
+	"wild-work/internal/raccoon"
 	"wild-work/internal/scheduler"
 	"wild-work/internal/server"
 	"wild-work/internal/systray"
@@ -168,7 +170,31 @@ func New(opts Options) (*App, error) {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetOutput(&logWriter{app: a})
 	a.loadPricingCache()
+	a.healRaccoonProtocol()
 	return a, nil
+}
+
+// stateDir 数据目录（loginStateFP / pricingFP 都在这里）。
+func (a *App) stateDir() string { return filepath.Dir(a.cfg.StateFile) }
+
+// healRaccoonProtocol 启动自愈：小浣熊授权登录会在 data/ 留一份注册表备份，
+// 正常结束时会自行删除。若启动时它还在，说明上次登录中途退出/崩溃/被强杀，
+// 此时立刻把 office-raccoon 注册表恢复原状，避免协议长期指向本程序。
+func (a *App) healRaccoonProtocol() {
+	dir := a.stateDir()
+	if !raccoon.HasPendingHijack(dir) {
+		return
+	}
+	restored, err := raccoon.RestoreProtocol(raccoon.BackupPath(dir))
+	switch {
+	case err != nil:
+		log.Printf("启动自愈：小浣熊协议注册表恢复失败：%v（可手动检查 HKCU\\%s）", err, raccoon.ProtocolKeyPath)
+	case restored:
+		log.Printf("启动自愈：检测到上次登录残留的协议注册改写，已恢复 %s 注册表", raccoon.ProtocolScheme)
+	default:
+		log.Printf("启动自愈：残留备份存在但注册表已被官方客户端重写，仅清理备份文件")
+	}
+	_ = raccoon.ClearCallback(dir)
 }
 
 // Close 关闭日志文件。
@@ -203,7 +229,7 @@ func (a *App) runtime(kind provider.Kind) *Runtime {
 func (a *App) firstRuntime() *Runtime {
 	// oczen 排在末位：它无调度器活动，不应成为「签到时间/下次签到」的展示来源。
 	// 顺序即展示优先级：新渠道追加在 Oczen 之前（Oczen 恒末位）。
-	for _, k := range []provider.Kind{provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM, provider.MonkeyCode, provider.Oczen} {
+	for _, k := range []provider.Kind{provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM, provider.MonkeyCode, provider.Raccoon, provider.Oczen} {
 		if rt := a.runtime(k); rt != nil {
 			return rt
 		}
@@ -248,7 +274,7 @@ var feeChannelOrder = []provider.Kind{
 	provider.Oczen, provider.WorkBuddy, provider.WorkBuddyAI, provider.QoderCN,
 	provider.QoderCOM, provider.TraeWork, provider.TraeCode, provider.QwenWork, provider.GLM,
 	provider.MonkeyCode,
-}
+	provider.Raccoon}
 
 // channelRank 渠道排序键：未知渠道排最后。
 func channelRank(k provider.Kind) int {
@@ -270,9 +296,10 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // QoderCN/QoderCOM 已实现 campaigns 签到，支持手动按钮（上游同一套机制）。
 // 智谱清言已实现 activity-api 每日签到，支持手动按钮。
 // MonkeyCode 一期也不提供手动签到：上游未提供额度或签到端点。
+// 小浣熊一期也不提供手动签到：上游未提供额度或签到端点。
 // OpenCodeZen 匿名通道无账号概念，既无签到也无积分。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Oczen
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Raccoon || k == provider.Oczen
 }
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
@@ -425,7 +452,10 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.MonkeyCode:
 		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
 		return "", fmt.Errorf("%s 渠道无需登录：请在面板点「从本机客户端导入」（复用本机已登录的官方客户端凭据）", k)
-	case provider.Oczen:
+	case provider.Raccoon:
+		// 小浣熊：浏览器授权登录 —— 登录期间临时接管 office-raccoon 协议回调，
+		// 拿到网页授权码后自行兑换 token，随后恢复注册表（见 internal/login_raccoon）。
+		// 面板同时保留「从本机客户端导入」作为回退路径。	case provider.Oczen:
 		// 匿名通道无账号可登（凭证固定为 public，启动时已注入虚拟账号）
 		return "", errors.New("OpenCodeZen 为匿名通道，无需也无法添加账号")
 	case provider.GLM:
@@ -456,6 +486,8 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		a.loginClient = loginwbai.NewClient()
 	case provider.QwenWork:
 		a.loginClient = loginqwenwork.NewClient()
+	case provider.Raccoon:
+		a.loginClient = loginraccoon.NewClient()
 	default:
 		a.loginClient = login.NewClient()
 	}
@@ -477,6 +509,13 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		authURL, err = loginwbai.Start(a.loginClient, a.loginStateFP)
 	case provider.QwenWork:
 		authURL, err = loginqwenwork.Start(a.loginClient, a.loginStateFP)
+	case provider.Raccoon:
+		// 协议回调接管要把「自身 exe 绝对路径」写进注册表命令行，故这里先取 os.Executable。
+		if exe, eerr := os.Executable(); eerr != nil {
+			err = fmt.Errorf("无法确定自身可执行文件路径：%w", eerr)
+		} else {
+			authURL, err = loginraccoon.Start(a.loginClient, a.loginStateFP, a.stateDir(), exe)
+		}
 	default:
 		ep := login.EndpointsForRegion(a.cfg.Region)
 		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
@@ -511,6 +550,10 @@ func (a *App) CancelLogin() error {
 	if kind == provider.QwenWork {
 		loginqwenwork.Shutdown()
 	}
+	// 小浣熊授权登录：取消时立刻恢复注册表（幂等；pollLogin 的 defer 还会再兜一次）
+	if kind == provider.Raccoon {
+		loginraccoon.Shutdown(a.loginStateFP, a.stateDir())
+	}
 	log.Printf("登录已取消")
 	return nil
 }
@@ -520,6 +563,11 @@ func (a *App) pollLogin(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("login poll panic: %v", r)
+		}
+		// 小浣熊授权登录：无论成功、失败、超时、取消还是 panic，
+		// 都必须把 office-raccoon 注册表恢复原状（Shutdown 幂等）。
+		if a.loginKind == provider.Raccoon {
+			loginraccoon.Shutdown(a.loginStateFP, a.stateDir())
 		}
 		a.finishLogin()
 	}()
@@ -604,6 +652,20 @@ func (a *App) pollLogin(ctx context.Context) {
 			}
 			continue
 		}
+		if a.loginKind == provider.Raccoon {
+			r, err := loginraccoon.Poll(a.loginClient, a.loginStateFP, a.stateDir())
+			if err == nil {
+				a.completeRaccoonLogin(r)
+				return
+			}
+			if !errors.Is(err, loginraccoon.ErrPending) {
+				// 终态错误（回调不可用 / 授权码兑换失败）：立即结束轮询，
+				// 由 defer 恢复注册表；继续轮询只会重复报同一个错。
+				log.Printf("raccoon login poll failed: %v", err)
+				return
+			}
+			continue
+		}
 		r, err := login.Poll(a.loginClient, a.loginStateFP, login.EndpointsForRegion(a.cfg.Region))
 		if err == nil {
 			a.completeLogin(r)
@@ -613,6 +675,45 @@ func (a *App) pollLogin(ctx context.Context) {
 			log.Printf("workbuddy login poll failed: %v", err)
 		}
 	}
+}
+
+// completeRaccoonLogin 小浣熊授权登录成功：把网页授权码换来的 token 落成本工具凭据。
+// 凭据形态与「从本机客户端导入」完全一致（两者拿到的是同一个上游账号）：
+// uid 取 access_token 的 JWT name claim，domain/apiHost 对齐 internal/raccoon 的调用前缀。
+// 小浣熊无签到活动，故不做首次签到；access_token 约 2h，靠 refresh_token 续期。
+func (a *App) completeRaccoonLogin(r loginraccoon.Result) {
+	uid := strings.TrimSpace(jwtClaim(r.AccessToken, "name"))
+	if uid == "" {
+		uid = "default"
+	}
+	expiresAt := r.ExpiresAt
+	if expiresAt <= 0 {
+		expiresAt = time.Now().Add(2 * time.Hour).Unix() // 实测 access_token 寿命约 2h
+	}
+	log.Printf("raccoon 登录成功 uid=%s org=%s refresh_token=%t", uid, r.OfficeOrgName, r.RefreshToken != "")
+	doc := authDoc{
+		Auth: authSection{
+			AccessToken:  r.AccessToken,
+			RefreshToken: r.RefreshToken,
+			ExpiresAt:    expiresAt,
+			Domain:       "/api/web/llm/v2",
+			ApiHost:      raccoon.MainSite,
+		},
+		Account: accountSection{
+			UID:          uid,
+			EnterpriseID: r.OfficeIdentity,
+			Nickname:     uid,
+		},
+	}
+	fp, err := a.writeAuthFile("raccoon", uid, doc)
+	if err != nil {
+		log.Printf("raccoon 登录保存凭证失败 uid=%s err=%v", uid, err)
+		return
+	}
+	log.Printf("raccoon 登录凭证已保存 uid=%s file=%s", uid, filepath.Base(fp))
+	a.reloadAccounts()
+	a.finishLogin()
+	a.afterAccountAdded(provider.Raccoon)
 }
 
 // completeLogin 登录成功：写 auth 文件、重载账号池，异步签到。
@@ -1052,6 +1153,14 @@ func (a *App) reloadAccounts() {
 			rt.Pool.SyncToDir(auths)
 		}
 	}
+	if rt := a.runtime(provider.Raccoon); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadRaccoonDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload raccoon accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
 }
 
 // CheckinAccount 单个账号立即签到。
@@ -1259,7 +1368,7 @@ func (a *App) StartPricingAutoRefresh(ctx context.Context, interval time.Duratio
 // 为什么必须有这一步（issue #40）：费率面板读 CachedChannelModels（只读缓存、
 // 不发网络请求），而缓存 rt.models 此前**只有 /v1/models 请求会填充**——
 // RefreshPricing 只拉费率不拉模型。于是冷启动后，凡无静态兑底表的渠道
-//（qodercn/qodercom）在面板上整组消失，直到某个客户端碰巧请求了 /v1/models。
+// （qodercn/qodercom）在面板上整组消失，直到某个客户端碰巧请求了 /v1/models。
 // 故模型列表的填充必须与费率刷新同样走后台定时路径。
 //
 // 网络开销可控：ChannelModels 内部 fetchRuntimeModels 自带 1h TTL 与
@@ -2025,6 +2134,7 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 	// 导入型渠道（MonkeyCode）：从本机已登录的官方客户端读取凭据并写入 auths/。
+	// 导入型渠道（小浣熊）：从本机已登录的官方客户端读取凭据并写入 auths/。
 	mux.HandleFunc("POST /api/account/import_local", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Channel string `json:"channel"`

@@ -36,6 +36,7 @@ import (
 	"wild-work/internal/qodercn"
 	"wild-work/internal/qodercom"
 	"wild-work/internal/qwenwork"
+	"wild-work/internal/raccoon"
 	"wild-work/internal/scheduler"
 	"wild-work/internal/server"
 	"wild-work/internal/systray"
@@ -136,11 +137,16 @@ func main() {
 	if err != nil {
 		fatal("读取 MonkeyCode 账号目录失败：%v", err)
 	}
+	// 小浣熊：导入型渠道，凭据由面板「从本机客户端导入」或浏览器授权登录写入 auths/。
+	rcAuths, err := auth.LoadRaccoonDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取小浣熊账号目录失败：%v", err)
+	}
 	// OpenCodeZen 匿名通道无凭证文件：全程只有一个虚拟账号，
 	// 不经目录扫描、不参与 reload（见 app.reloadAccounts 的说明）。
 	ocAuths := []*auth.Auth{oczen.AnonymousAuth()}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, oczen=%d(匿名) from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(ocAuths), cfg.AuthDir)
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, oczen=%d(匿名) from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(ocAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -184,6 +190,10 @@ func main() {
 	for _, a := range mcAuths {
 		mcPool.Add(a)
 	}
+	rcPool := pool.New(filepath.Join(stateDir, "state-raccoon.json"))
+	for _, a := range rcAuths {
+		rcPool.Add(a)
+	}
 	// oczen：整池只有一个匿名虚拟账号，state 仅用于记冷却（无积分、无签到）
 	ocPool := pool.New(filepath.Join(stateDir, "state-oczen.json"))
 	for _, a := range ocAuths {
@@ -213,6 +223,8 @@ func main() {
 	qcmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	mcUp := monkeycode.New()
 	mcUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	rcUp := raccoon.New()
+	rcUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	ocUp := oczen.New()
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
@@ -236,6 +248,7 @@ func main() {
 		provider.QoderCOM.String():    {qcmUp.HTTP, qcmUp.StreamHTTP},
 		provider.QwenWork.String():    {qwUp.HTTP, qwUp.StreamHTTP},
 		provider.MonkeyCode.String():  {mcUp.HTTP, mcUp.StreamHTTP},
+		provider.Raccoon.String():     {rcUp.HTTP, rcUp.StreamHTTP},
 		provider.Oczen.String():       {ocUp.HTTP, ocUp.StreamHTTP},
 		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
 		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
@@ -293,6 +306,12 @@ func main() {
 	// 9:00/21:00 签到与 22:00 保活，每天产生两次必然失败的调用与失败日志。
 	mcSch := scheduler.New(scheduler.Config{Pool: mcPool, Upstream: mcUp, Name: "monkeycode",
 		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+	// 小浣熊：无签到（CheckinMinutes 用显式空切片，nil 会被补成 9:00/21:00）；
+	// access_token 实测仅 ≈2h，而 refresh_token ≈30 天，
+	// 故保活比其它渠道更密（每 4 小时一次）以减少「请求先 401 再刷新」的额外往返；
+	// 请求路径上的 refreshIfSessionDead 仍会兜底自愈。
+	rcSch := scheduler.New(scheduler.Config{Pool: rcPool, Upstream: rcUp, Name: "raccoon",
+		CheckinMinutes: []int{}, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	// OpenCodeZen 匿名：无账号、无签到、无 token 可保活（凭证是常量 public）。
 	// CheckinMinutes/KeepaliveHours 均为显式空切片 → 调度器不发生任何上游调用。
 	ocSch := scheduler.New(scheduler.Config{Pool: ocPool, Upstream: ocUp, Name: "oczen",
@@ -319,6 +338,7 @@ func main() {
 		provider.QoderCOM:   {Kind: provider.QoderCOM, Pool: qcmPool, Upstream: qcmUp, StaticModels: qodercom.StaticModels()},
 		provider.QwenWork:   {Kind: provider.QwenWork, Pool: qwPool, Upstream: qwUp, StaticModels: qwenwork.StaticModels()},
 		provider.MonkeyCode: {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, StaticModels: monkeycode.StaticModels()},
+		provider.Raccoon:    {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, StaticModels: raccoon.StaticModels()},
 		provider.GLM:        {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
@@ -344,6 +364,7 @@ func main() {
 		provider.QoderCOM:    {Kind: provider.QoderCOM, Pool: qcmPool, Upstream: qcmUp, Scheduler: qcmSch},
 		provider.QwenWork:    {Kind: provider.QwenWork, Pool: qwPool, Upstream: qwUp, Scheduler: qwSch},
 		provider.MonkeyCode:  {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, Scheduler: mcSch},
+		provider.Raccoon:     {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, Scheduler: rcSch},
 		provider.GLM:         {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 		provider.Oczen:       {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
 	}
@@ -459,6 +480,7 @@ func main() {
 	go qcnSch.Run(sctx)
 	go qcmSch.Run(sctx)
 	go mcSch.Run(sctx)
+	go rcSch.Run(sctx)
 	go ocSch.Run(sctx)
 	// ⚠️ 新增渠道时必须在这里补 Run()。
 	// 漏了**不会报错**——只表现为「该渠道的自动签到/保活从不运行」，
@@ -478,6 +500,7 @@ func main() {
 		// 旧 Qoder 渠道已下线：不自动刷积分/token（避免周期性 token refresh failed 噪音）
 		provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM,
 		provider.MonkeyCode,
+		provider.Raccoon,
 	}, app.CreditRefreshInterval)
 
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。

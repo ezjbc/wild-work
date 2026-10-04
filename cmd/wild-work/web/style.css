@@ -452,6 +452,12 @@ body {
 .badge.monkeycode { background: #b45309; }
 .fees .ch-header.monkeycode td { color: #b45309; }
 
+/* raccoon 商汤小浣熊渠道色（取客户端 branding 的紫罗兰 #8E6BF2） */
+.btn.primary.alt.raccoon { background: #8e6bf2; border-color: #8e6bf2; }
+.btn.primary.alt.raccoon:hover { background: #7c56e8; }
+.badge.raccoon { background: #8e6bf2; }
+.fees .ch-header.raccoon td { color: #8e6bf2; }
+
 /* oczen：OpenCodeZen 匿名通道（暗灰蓝，与其它紫/青系区分，弱化「固定账号」观感） */
 .badge.oczen { background: #475569; }
 .fees .ch-header.oczen td { color: #475569; }

@@ -2,6 +2,7 @@ package app
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,9 @@ import (
 //
 // MonkeyCode 的凭据来自官方客户端（ohmyagent）的 settings.json：
 // 一个账号 = oma_ api_key + omas_ signing_secret，另有控制台侧的会话 Cookie。
+//
+// 小浣熊的凭据来自官方客户端（%USERPROFILE%\.box-agent\configuth.json 明文 JSON）。
+// 面板另有「浏览器授权登录」主路径（见 internal/login_raccoon），导入作为回退。
 //
 // 设计要点：
 //   - 路径**自适应探测**（多候选 + 环境变量覆盖），不做硬编码单一路径；
@@ -75,6 +79,8 @@ func (a *App) ImportLocalCredentials(channel string) (*ImportLocalResult, error)
 	switch provider.Kind(strings.TrimSpace(channel)) {
 	case provider.MonkeyCode:
 		return a.importMonkeyCode()
+	case provider.Raccoon:
+		return a.importRaccoon()
 	}
 	return nil, fmt.Errorf("渠道 %q 不支持本地导入（该渠道请用面板的登录按钮）", channel)
 }
@@ -344,6 +350,120 @@ func sanitizeUID(uid string) string {
 		out = out[:64]
 	}
 	return out
+}
+
+// importRaccoon 读取商汤小浣熊客户端的 auth.json 并转换成本工具格式。
+func (a *App) importRaccoon() (*ImportLocalResult, error) {
+	path, err := raccoonClientAuthPath()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取客户端凭据失败（%s）：%w", path, err)
+	}
+	var payload struct {
+		AccessToken    string `json:"access_token"`
+		RefreshToken   string `json:"refresh_token"`
+		OfficeIdentity string `json:"office_identity"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("解析客户端凭据失败（%s）：%w", path, err)
+	}
+	access := strings.TrimSpace(payload.AccessToken)
+	if access == "" {
+		return nil, fmt.Errorf("客户端凭据里没有 access_token（%s）：请先在客户端完成登录", path)
+	}
+	uid := strings.TrimSpace(jwtClaim(access, "name"))
+	if uid == "" {
+		uid = "default"
+	}
+	doc := authDoc{
+		Auth: authSection{
+			AccessToken:  access,
+			RefreshToken: strings.TrimSpace(payload.RefreshToken),
+			ExpiresAt:    jwtExp(access),
+			Domain:       "/api/web/llm/v2",
+			ApiHost:      "https://xiaohuanxiong.com",
+		},
+		Account: accountSection{
+			UID:          uid,
+			EnterpriseID: strings.TrimSpace(payload.OfficeIdentity),
+			Nickname:     uid,
+		},
+	}
+	file, err := a.writeAuthFile("raccoon", uid, doc)
+	if err != nil {
+		return nil, err
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Raccoon)
+	return &ImportLocalResult{
+		Channel: "raccoon", UID: uid, File: filepath.Base(file),
+		Note: "access_token 约 2 小时有效，wild-work 会用 refresh_token 自动续期（上游会轮换 refresh_token，新值已随刷新落盘）",
+	}, nil
+}
+
+// raccoonClientAuthPath 定位小浣熊客户端凭据（自适应多候选）。
+func raccoonClientAuthPath() (string, error) {
+	var cands []string
+	// 客户端支持用 BOX_AGENT_CONFIG_DIR 覆盖配置目录（见 boxAgentAuthFile.js）。
+	if dir := strings.TrimSpace(os.Getenv("BOX_AGENT_CONFIG_DIR")); dir != "" {
+		cands = append(cands, filepath.Join(dir, "auth.json"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		cands = append(cands, filepath.Join(home, ".box-agent", "config", "auth.json"))
+	}
+	for _, p := range cands {
+		if fileExists(p) {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("未找到小浣熊客户端凭据（已尝试 %d 个路径，最后一个是 %s）：请先安装并登录「商汤小浣熊」客户端",
+		len(cands), cands[len(cands)-1])
+}
+
+// jwtPayload 解出 JWT 的 payload（失败返回 nil）。
+func jwtPayload(tok string) map[string]any {
+	parts := strings.Split(strings.TrimSpace(tok), ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	seg := strings.NewReplacer("-", "+", "_", "/").Replace(parts[1])
+	if m := len(seg) % 4; m != 0 {
+		seg += strings.Repeat("=", 4-m)
+	}
+	raw, err := base64.StdEncoding.DecodeString(seg)
+	if err != nil {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func jwtClaim(tok, key string) string {
+	m := jwtPayload(tok)
+	if m == nil {
+		return ""
+	}
+	if s, ok := m[key].(string); ok {
+		return s
+	}
+	return ""
+}
+
+func jwtExp(tok string) int64 {
+	m := jwtPayload(tok)
+	if m == nil {
+		return 0
+	}
+	if f, ok := m["exp"].(float64); ok {
+		return int64(f)
+	}
+	return 0
 }
 
 func fileExists(p string) bool {

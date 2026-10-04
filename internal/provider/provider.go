@@ -26,9 +26,12 @@ const (
 	// 一个账号 = oma_ api_key + omas_ signing_secret；上游无目录/额度/刷新接口，
 	// 故模型表静态、额度恒 0、RefreshToken 为空实现。
 	MonkeyCode Kind = "monkeycode"
-	TraeCode   Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
-	Oczen      Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
-	GLM        Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
+	// Raccoon 商汤小浣熊（xiaohuanxiong.com）：凭据由面板从本机官方客户端导入，
+	// access_token 约 2h + refresh_token 约 30d，可用 refresh_token 自动续期。
+	Raccoon  Kind = "raccoon"
+	TraeCode Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
+	Oczen    Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
+	GLM      Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
 )
 
 func (k Kind) String() string { return string(k) }
@@ -46,6 +49,7 @@ const (
 	ErrClient                        // 其他 4xx / 业务错误
 	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，透传原文
 	ErrPromptTooLong                 // 11115 上下文超限 → 请求级错误，不罚号不轮转，透传原文
+	ErrImageInvalid                  // 图片格式/数据无效（11135 等）→ 请求级错误，不罚号不轮转，透传原文
 	ErrBadParams                     // 出站 body / 请求参数无法被上游接受 → 请求级错误，不罚号不轮转，透传原文
 	ErrWafBlock                      // 403 + 非业务信封（WAF 拦截页/空体）→ 账号软冷却
 	ErrAccountFault                  // 账号级授权/配额故障（11140/14017）→ 冷却轮换
@@ -71,6 +75,8 @@ func (k ErrKind) String() string {
 		return "content_blocked"
 	case ErrPromptTooLong:
 		return "prompt_too_long"
+	case ErrImageInvalid:
+		return "image_invalid"
 	case ErrBadParams:
 		return "bad_params"
 	case ErrWafBlock:
