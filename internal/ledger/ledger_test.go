@@ -262,3 +262,77 @@ func TestQueryMonthEnum(t *testing.T) {
 		t.Fatalf("跨年枚举应含 202612+202701，got %v", got2)
 	}
 }
+
+// TestDiffCreditsNewKeyEarnsAfterBaseline 回归（2026-10-02 生产账本实证）：
+// 非首次刷新中出现的新 key 必须记 earn。
+//
+// 真实场景：WorkBuddy 伪键 =「套餐名|到期日」，月周期切换时旧键
+// "CodeBuddy个人体验版|2026-09-30" 消失（记 expire），余额挂在
+// "CodeBuddy个人体验版|2026-10-31" 上——旧实现把新 key 一律静默跳过，
+// 导致每账号每月约 2500 的周期发放从不进入收入流水（账本只降不升）。
+func TestDiffCreditsNewKeyEarnsAfterBaseline(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ledger")
+	l, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// 首次：只应有一条 baseline（存量额度），不得逐条展开
+	cur1 := []provider.ResourceItem{
+		{Name: "体验版", Key: "体验版|2026-09-30", Remain: 200, ExpireAt: "2026-09-30", Usable: true},
+	}
+	if n := l.DiffCredits("workbuddy", "u1", 200, cur1); n != 1 {
+		t.Fatalf("首次应只记 1 条 baseline，got %d", n)
+	}
+
+	// 周期切换：旧键消失（expire -200）+ 新键 2500（earn +2500）= 2 条
+	cur2 := []provider.ResourceItem{
+		{Name: "体验版", Key: "体验版|2026-10-31", Remain: 2500, ExpireAt: "2026-10-31", Usable: true},
+	}
+	if n := l.DiffCredits("workbuddy", "u1", 2500, cur2); n != 2 {
+		t.Fatalf("换池应记 expire+earn 共 2 条，got %d", n)
+	}
+
+	l.Flush()
+	raw, _ := os.ReadFile(filepath.Join(dir, monthFile("credit", time.Now())))
+	var es []CreditEntry
+	for _, line := range splitLines(raw) {
+		var e CreditEntry
+		if unmarshal(line, &e) == nil {
+			es = append(es, e)
+		}
+	}
+	if len(es) != 3 {
+		t.Fatalf("entries=%d want 3", len(es))
+	}
+	// 第 2、3 条为换池产物：一条 expire(-200)、一条 earn(+2500)
+	var sawExpire, sawEarn bool
+	for _, e := range es[1:] {
+		switch {
+		case e.Kind == "expire" && e.Amount == -200:
+			sawExpire = true
+		case e.Kind == "earn" && e.Amount == 2500:
+			sawEarn = true
+		}
+	}
+	if !sawExpire || !sawEarn {
+		t.Fatalf("换池应含 expire(-200)+earn(+2500)，got %+v", es[1:])
+	}
+}
+
+// TestDiffCreditsSameKeyUnchangedNoEvents 新逻辑不得引入噪声：
+// 同 key 同余额的重复刷新仍然零事件。
+func TestDiffCreditsSameKeyUnchangedNoEvents(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ledger")
+	l, _ := New(dir)
+	defer l.Close()
+
+	cur := []provider.ResourceItem{
+		{Name: "包", Key: "pkg|10-31", Remain: 500, ExpireAt: "2026-10-31", Usable: true},
+	}
+	l.DiffCredits("workbuddy", "u9", 500, cur) // baseline 1 条
+	if n := l.DiffCredits("workbuddy", "u9", 500, cur); n != 0 {
+		t.Fatalf("无变化刷新应零事件，got %d", n)
+	}
+}
