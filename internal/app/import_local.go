@@ -27,6 +27,8 @@ import (
 // 小浣熊的凭据来自官方客户端（%USERPROFILE%\.box-agent\configuth.json 明文 JSON）。
 // 面板另有「浏览器授权登录」主路径（见 internal/login_raccoon），导入作为回退。
 //
+// Loomy 的凭据来自官方客户端的会话文件（auth-session.json）。
+//
 // 设计要点：
 //   - 路径**自适应探测**（多候选 + 环境变量覆盖），不做硬编码单一路径；
 //   - 只在 Windows 生效（客户端只有 Windows 版）；
@@ -81,6 +83,8 @@ func (a *App) ImportLocalCredentials(channel string) (*ImportLocalResult, error)
 		return a.importMonkeyCode()
 	case provider.Raccoon:
 		return a.importRaccoon()
+	case provider.Loomy:
+		return a.importLoomy()
 	}
 	return nil, fmt.Errorf("渠道 %q 不支持本地导入（该渠道请用面板的登录按钮）", channel)
 }
@@ -309,6 +313,96 @@ func monkeyCodeSettingsPath() (string, error) {
 	}
 	return "", fmt.Errorf("未找到 MonkeyCode 客户端配置（已尝试 %d 个路径，最后一个是 %s）：请先安装并登录 MonkeyCode 客户端",
 		len(cands), last)
+}
+
+// importLoomy 读取讯飞 Loomy 客户端的 auth-session.json 并转换成本工具格式。
+func (a *App) importLoomy() (*ImportLocalResult, error) {
+	path, err := loomyClientSessionPath()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取客户端凭据失败（%s）：%w", path, err)
+	}
+	var payload struct {
+		Session   string `json:"session"`
+		UserID    string `json:"userid"`
+		Phone     string `json:"phone"`
+		UpdatedAt int64  `json:"updatedAt"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("解析客户端凭据失败（%s）：%w", path, err)
+	}
+	session := strings.TrimSpace(payload.Session)
+	if session == "" {
+		return nil, fmt.Errorf("客户端凭据里没有 session（%s）：请先在客户端完成登录", path)
+	}
+	uid := strings.TrimSpace(payload.UserID)
+	if uid == "" {
+		uid = "default"
+	}
+	// Loomy 无 refresh 端点，且 session 是客户端登录时申请 14 天有效期的短期凭据。
+	// 用 updatedAt + 14d 估算到期时刻：避免 NeedsRefreshLocked 因 ExpiresAt<=0 恒真
+	// 而触发一个必然失败的刷新。
+	base := payload.UpdatedAt
+	if base > 1e12 { // 毫秒 → 秒
+		base /= 1000
+	}
+	if base <= 0 {
+		base = time.Now().Unix()
+	}
+	doc := authDoc{
+		Auth: authSection{
+			AccessToken: session,
+			// 故意留空：scheduler 对 refreshToken 为空的账号会跳过保活（不会产生无意义失败）。
+			RefreshToken: "",
+			ExpiresAt:    base + 14*24*3600,
+			Domain:       "/api/v1",
+			ApiHost:      "https://loomyad.xunfei.cn",
+		},
+		Account: accountSection{UID: uid},
+	}
+	file, err := a.writeAuthFile("loomy", uid, doc)
+	if err != nil {
+		return nil, err
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Loomy)
+	return &ImportLocalResult{
+		Channel: "loomy", UID: uid, File: filepath.Base(file),
+		Note: "Loomy 无 refresh 端点（session 约 14 天），到期后需在客户端重新登录并再次导入",
+	}, nil
+}
+
+// loomyClientSessionPath 定位 Loomy 客户端会话文件（自适应多候选）。
+//
+// Loomy 的配置根目录是 `C:\Users\Public\Loomy\<sha256(用户名)[:12]>`（见客户端 config-path.js），
+// 因此这里**枚举该目录下所有 hash 子目录**，而不是自己算 hash ——
+// 这样跨账户、跨版本都能命中。
+func loomyClientSessionPath() (string, error) {
+	var cands []string
+	publicRoot := filepath.Join(`C:\Users\Public`, "Loomy")
+	if entries, err := os.ReadDir(publicRoot); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			cands = append(cands, filepath.Join(publicRoot, e.Name(), "userData", "auth-session.json"))
+		}
+	}
+	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+		cands = append(cands, filepath.Join(appData, "Loomy", "auth-session.json"))
+	}
+	for _, p := range cands {
+		if fileExists(p) {
+			return p, nil
+		}
+	}
+	if len(cands) == 0 {
+		return "", errors.New("未找到 Loomy 客户端目录（C:\\Users\\Public\\Loomy 不存在）：请先安装并登录 Loomy 客户端")
+	}
+	return "", fmt.Errorf("未找到 Loomy 会话文件（已尝试 %d 个路径）：请先在客户端完成登录", len(cands))
 }
 
 // writeAuthFile 原子写 auth 文件（tmp + rename，0600），文件名前缀即渠道 Kind。

@@ -229,7 +229,7 @@ func (a *App) runtime(kind provider.Kind) *Runtime {
 func (a *App) firstRuntime() *Runtime {
 	// oczen 排在末位：它无调度器活动，不应成为「签到时间/下次签到」的展示来源。
 	// 顺序即展示优先级：新渠道追加在 Oczen 之前（Oczen 恒末位）。
-	for _, k := range []provider.Kind{provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM, provider.MonkeyCode, provider.Raccoon, provider.Oczen} {
+	for _, k := range []provider.Kind{provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM, provider.MonkeyCode, provider.Raccoon, provider.Loomy, provider.Oczen} {
 		if rt := a.runtime(k); rt != nil {
 			return rt
 		}
@@ -274,7 +274,9 @@ var feeChannelOrder = []provider.Kind{
 	provider.Oczen, provider.WorkBuddy, provider.WorkBuddyAI, provider.QoderCN,
 	provider.QoderCOM, provider.TraeWork, provider.TraeCode, provider.QwenWork, provider.GLM,
 	provider.MonkeyCode,
-	provider.Raccoon}
+	provider.Raccoon,
+	provider.Loomy,
+}
 
 // channelRank 渠道排序键：未知渠道排最后。
 func channelRank(k provider.Kind) int {
@@ -297,9 +299,10 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // 智谱清言已实现 activity-api 每日签到，支持手动按钮。
 // MonkeyCode 一期也不提供手动签到：上游未提供额度或签到端点。
 // 小浣熊一期也不提供手动签到：上游未提供额度或签到端点。
+// Loomy 一期也不提供手动签到：上游未提供额度或签到端点。
 // OpenCodeZen 匿名通道无账号概念，既无签到也无积分。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Raccoon || k == provider.Oczen
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Raccoon || k == provider.Loomy || k == provider.Oczen
 }
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
@@ -455,7 +458,11 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.Raccoon:
 		// 小浣熊：浏览器授权登录 —— 登录期间临时接管 office-raccoon 协议回调，
 		// 拿到网页授权码后自行兑换 token，随后恢复注册表（见 internal/login_raccoon）。
-		// 面板同时保留「从本机客户端导入」作为回退路径。	case provider.Oczen:
+		// 面板同时保留「从本机客户端导入」作为回退路径。
+	case provider.Loomy:
+		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
+		return "", fmt.Errorf("%s 渠道无需登录：请在面板点「从本机客户端导入」（复用本机已登录的官方客户端凭据）", k)
+	case provider.Oczen:
 		// 匿名通道无账号可登（凭证固定为 public，启动时已注入虚拟账号）
 		return "", errors.New("OpenCodeZen 为匿名通道，无需也无法添加账号")
 	case provider.GLM:
@@ -1157,6 +1164,14 @@ func (a *App) reloadAccounts() {
 		auths, err := auth.LoadRaccoonDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload raccoon accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.Loomy); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadLoomyDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload loomy accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}
@@ -2135,6 +2150,7 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	// 导入型渠道（MonkeyCode）：从本机已登录的官方客户端读取凭据并写入 auths/。
 	// 导入型渠道（小浣熊）：从本机已登录的官方客户端读取凭据并写入 auths/。
+	// 导入型渠道（Loomy）：从本机已登录的官方客户端读取凭据并写入 auths/。
 	mux.HandleFunc("POST /api/account/import_local", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Channel string `json:"channel"`
