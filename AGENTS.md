@@ -35,7 +35,7 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R7 | **移除 wails / WebView2 全部依赖** | 省内存与运行时；平台能力封装进 `internal/platform`（build tag 拆分） |
 | R8 | daemon 单进程：一个 `http.Server` 同时服务 OpenAI 端点 + 管理 API + 静态 UI | 沿用 server 现有 ServeMux 扩展 |
 | R9 | 核心业务（pool/scheduler/upstream/traework/server/login/config/auth/provider）**整体复用**，格式零迁移 | config.json / auths/ / data/state.json 兼容旧版；旧 state.json 自动迁移到 state-workbuddy.json |
-| R10 | 新增渠道扩展方式：实现 `provider.Upstream` 接口 + auth 加载器 + 注册 Runtime | 模型前缀 `channel/<model>` 路由；已实现 WorkBuddyCN(国内) + WorkBuddyAI(国际) + TraeWork + TraeCode(与 TraeWork 共账号，function=solo_agent) + QoderCN + QoderCOM(国际) + 千问办公(qwenwork) + 智谱清言(glm) + OpenCodeZen(oczen 匿名) 九渠道；旧 Qoder（`qoder/*`，QoderWork）已从界面下线但路由保留 |
+| R10 | 新增渠道扩展方式：实现 `provider.Upstream` 接口 + auth 加载器 + 注册 Runtime | 模型前缀 `channel/<model>` 路由；已实现 WorkBuddyCN(国内) + WorkBuddyAI(国际) + TraeWork + TraeCode(与 TraeWork 共账号，function=solo_agent) + QoderCN + QoderCOM(国际) + 千问办公(qwenwork) + MonkeyCode(monkeycode，平台托管模型) + 智谱清言(glm) + OpenCodeZen(oczen 匿名) 十渠道；旧 Qoder（`qoder/*`，QoderWork）已从界面下线但路由保留 |
 | R11 | Windows 产物在 WSL 交叉编译（`GOOS=windows CGO_ENABLED=0`，已验证可行）；macOS 产物走 GitHub Actions macos-latest（cgo 必需） | WSL 无法编 darwin cgo；CI 增加 darwin job |
 | R12 | **无桌面 Linux 使用 `--no-tray` 参数** | 无参启动在无 DBus 环境托盘 panic 直接 exit 并提示；`--no-tray` 跳过托盘打印信息阻塞等待 Ctrl+C |
 | R13 | **三接口兼容采用两层结构：内层 handler 不动，新增 `internal/gateway` 边缘层**，经 **in-process 调用**（`io.Pipe` + ResponseWriter 形状）复用内层 | 代码量比内联重构多 20%，但改动面小一个数量级（主链路仅 2 处调用点 + 1 个访问器），回归风险低、可脱离 pool 单测。**不得用 HTTP 自环**（`0.0.0.0` 监听不可作目标、鉴权双份、启动竞态） |
@@ -142,7 +142,7 @@ GET  /api/logs                     # 最近 300 行日志
 POST /api/quit                     # 退出程序
 ```
 
-## 5. 渠道（已实现 WorkBuddyCN + WorkBuddyAI 国际版 + TraeWork + QoderCN + QoderCOM 国际版 + 千问办公 + 智谱清言 + OpenCodeZen 匿名；旧 Qoder 已下线）
+## 5. 渠道（已实现 WorkBuddyCN + WorkBuddyAI 国际版 + TraeWork + QoderCN + QoderCOM 国际版 + 千问办公 + MonkeyCode + 智谱清言 + OpenCodeZen 匿名；旧 Qoder 已下线）
 
 1. 新建 `internal/<channel>/` 包，实现 `provider.Upstream` 接口
 2. `internal/auth` 增加对应 `Load<Channel>Dir()`（文件名前缀 `<channel>-*.json`；
@@ -163,6 +163,11 @@ POST /api/quit                     # 退出程序
 > **旧 Qoder（`qoder/*`，QoderWork）已从界面下线**：代码与路由保留，存量账号仍可用；不新增功能，后续可移除。
 > WorkBuddyAI 国际版：`DailyCheckin` 实现为「免费模型对话保活 + 签到探测」（对用户透明，无前端界面）；
 > token 有效期 365 天，故 KeepaliveHours 设为 nil。详见 `docs/workbuddy国际版渠道接入备忘.md`。
+> **MonkeyCode（`monkeycode/*`，平台托管模型）**：凭据由面板「从本机客户端导入」从官方客户端
+> （ohmyagent）的 settings.json 取得，一个账号 = `oma_` api_key + `omas_` signing_secret；
+> 按模型声明的 type 分流到 `{base}/messages`（Anthropic 形状）或 `{base}/responses`（Responses 形状），
+> 两路都是无状态 SSE；上游无目录/额度/刷新接口 → 模型表静态、额度恒 0、`RefreshToken` 空实现。
+> 协议对照参考：`codkeep/MonkeyCodeReverseEngineer`（Apache-2.0）。
 > **OpenCodeZen（`oczen/*`，匿名免费）**：凭证固定字面量 `public`，无账号/无签到/无积分；
 > 免费档有三道闸门（规范 `ses_<12hex><14Base62>` 会话头 + `stream:true` 且 tools 含 `bash`/`read` +
 > OpenCode CLI 伪装头），缺一即 403 FreeTierError；面板固定一项「[OpenCodeZen] 匿名」、积分显示「不适用」，

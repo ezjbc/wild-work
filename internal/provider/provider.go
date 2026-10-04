@@ -22,9 +22,13 @@ const (
 	QoderCN     Kind = "qodercn"  // QoderCN（qoder.com.cn，移植自 qoder2api，独立渠道）
 	QoderCOM    Kind = "qodercom" // QoderCOM 国际版（qoder.com / qoder.sh，移植自 qodercn）
 	QwenWork    Kind = "qwenwork" // 千问办公（gateway.qwenwork.cn + qwenwork.cn）
-	TraeCode    Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
-	Oczen       Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
-	GLM         Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
+	// MonkeyCode 平台托管模型（proxy.monkeycode-ai.com）：凭据由面板从本机官方客户端导入，
+	// 一个账号 = oma_ api_key + omas_ signing_secret；上游无目录/额度/刷新接口，
+	// 故模型表静态、额度恒 0、RefreshToken 为空实现。
+	MonkeyCode Kind = "monkeycode"
+	TraeCode   Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
+	Oczen      Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
+	GLM        Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
 )
 
 func (k Kind) String() string { return string(k) }
@@ -42,6 +46,7 @@ const (
 	ErrClient                        // 其他 4xx / 业务错误
 	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，透传原文
 	ErrPromptTooLong                 // 11115 上下文超限 → 请求级错误，不罚号不轮转，透传原文
+	ErrBadParams                     // 出站 body / 请求参数无法被上游接受 → 请求级错误，不罚号不轮转，透传原文
 	ErrWafBlock                      // 403 + 非业务信封（WAF 拦截页/空体）→ 账号软冷却
 	ErrAccountFault                  // 账号级授权/配额故障（11140/14017）→ 冷却轮换
 	ErrModelBlocked                  // 11102 该后端无此模型 → (账号,模型) 负缓存避让
@@ -66,6 +71,8 @@ func (k ErrKind) String() string {
 		return "content_blocked"
 	case ErrPromptTooLong:
 		return "prompt_too_long"
+	case ErrBadParams:
+		return "bad_params"
 	case ErrWafBlock:
 		return "waf_block"
 	case ErrAccountFault:
@@ -241,12 +248,21 @@ type ResourceItem struct {
 	// 本工具走的是 ep=0；这类额度对用户是「看得见用不了」，需在界面上分开统计。
 	// 注意：零值为 false，故各渠道构造时须显式置位；渠道无此概念时统一填 true。
 	Usable bool `json:"usable"`
+	// InfoOnly 标记该条目**只作展示**，不参与任何积分算术（Summarize 小计、
+	// ExpiringWithin 临期、ledger 差分）。用于「同一账号下计量单位不同的另一套额度」——
+	// 如 MonkeyCode 的每日 Token 额度（单位是 token，而积分是 credits）：
+	// 两者都该显示，但相加无意义。
+	// 注意：InfoOnly 条目应同时置 Usable=true（它在界面上既非「不可用」，也不该被小计）。
+	InfoOnly bool `json:"info_only,omitempty"`
 }
 
 // Summarize 按 Usable 标记汇总条目：返回 (可消耗剩余, 不可消耗剩余)。
 // 供 app 层统一填充 ResourceDetail 接口的两个小计字段，避免多处各写一份循环。
 func Summarize(items []ResourceItem) (usable, unusable int64) {
 	for _, it := range items {
+		if it.InfoOnly {
+			continue
+		}
 		if it.Usable {
 			usable += it.Remain
 		} else {
@@ -269,7 +285,7 @@ func ExpiringWithin(items []ResourceItem, horizon time.Duration) int64 {
 	deadline := time.Now().In(expireLoc).Add(horizon)
 	var expiring int64
 	for _, it := range items {
-		if !it.Usable || it.ExpireAt == "" {
+		if !it.Usable || it.InfoOnly || it.ExpireAt == "" {
 			continue
 		}
 		// 日期解析到当天零点（UTC+8），零点落在 deadline 之前即视为临期
