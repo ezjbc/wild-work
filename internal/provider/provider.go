@@ -26,7 +26,7 @@ const (
 	// 一个账号 = oma_ api_key + omas_ signing_secret；上游无目录/额度/刷新接口，
 	// 故模型表静态、额度恒 0、RefreshToken 为空实现。
 	MonkeyCode Kind = "monkeycode"
-	// Raccoon 商汤小浣熊（xiaohuanxiong.com）：凭据由面板从本机官方客户端导入，
+	// Raccoon 小浣熊（xiaohuanxiong.com）：凭据由面板从本机官方客户端导入，
 	// access_token 约 2h + refresh_token 约 30d，可用 refresh_token 自动续期。
 	Raccoon Kind = "raccoon"
 	// Loomy 讯飞 Loomy（loomyad.xunfei.cn）：凭据由面板从本机官方客户端导入，

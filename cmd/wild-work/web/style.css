@@ -71,7 +71,7 @@ body {
 .pa-left .btn { white-space: nowrap; align-self: flex-start; }
 .pa-right {
   display: grid;
-  grid-template-columns: repeat(4, auto);
+  grid-template-columns: repeat(5, auto);
   gap: 8px 12px;
 }
 .pa-right .btn { justify-self: stretch; white-space: nowrap; }
@@ -452,7 +452,7 @@ body {
 .badge.monkeycode { background: #b45309; }
 .fees .ch-header.monkeycode td { color: #b45309; }
 
-/* raccoon 商汤小浣熊渠道色（取客户端 branding 的紫罗兰 #8E6BF2） */
+/* raccoon 小浣熊渠道色（取客户端 branding 的紫罗兰 #8E6BF2） */
 .btn.primary.alt.raccoon { background: #8e6bf2; border-color: #8e6bf2; }
 .btn.primary.alt.raccoon:hover { background: #7c56e8; }
 .badge.raccoon { background: #8e6bf2; }

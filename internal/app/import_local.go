@@ -446,7 +446,7 @@ func sanitizeUID(uid string) string {
 	return out
 }
 
-// importRaccoon 读取商汤小浣熊客户端的 auth.json 并转换成本工具格式。
+// importRaccoon 读取小浣熊客户端的 auth.json 并转换成本工具格式。
 func (a *App) importRaccoon() (*ImportLocalResult, error) {
 	path, err := raccoonClientAuthPath()
 	if err != nil {
@@ -513,7 +513,7 @@ func raccoonClientAuthPath() (string, error) {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("未找到小浣熊客户端凭据（已尝试 %d 个路径，最后一个是 %s）：请先安装并登录「商汤小浣熊」客户端",
+	return "", fmt.Errorf("未找到小浣熊客户端凭据（已尝试 %d 个路径，最后一个是 %s）：请先安装并登录「小浣熊」客户端",
 		len(cands), cands[len(cands)-1])
 }
 
