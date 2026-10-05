@@ -2,6 +2,10 @@
 // 单进程 = OpenAI 兼容 HTTP 服务 + 自动签到调度器 + 系统托盘 + 静态 Web UI。
 // 双击 exe 启动常驻托盘；托盘菜单：打开主界面 / 刷新积分 / 查看日志 / 退出；
 // 打开主界面或双击托盘 → 系统浏览器打开 Web UI。
+//
+// 另有一个**非守护**入口：`--raccoon-callback <深链>`（小浣熊授权登录的协议回调，
+// 由 Windows 按 HKCU 的 office-raccoon 注册表唤起）。该分支只把深链解析后落盘再退出，
+// **绝不**启动第二份服务/托盘——详见 handleRaccoonCallback。
 package main
 
 import (
@@ -56,6 +60,18 @@ func main() {
 	// 工作目录：便携/CLI 形态固定为 exe 所在目录，保证相对路径配置（./auths ./data）稳定。
 	// macOS .app bundle 内该目录只读、且随 app 替换被清空，故改用系统数据目录（见 workDir）。
 	_ = os.Chdir(workDir())
+
+	// 小浣熊授权登录的协议回调：由 Windows 按注册表命令行唤起本 exe。
+	// 必须在**任何**初始化（config/日志/服务）之前拦下——它只落盘一个文件就退出，
+	// 若走后面流程会启动第二份 daemon（日志与本进程抢锁、还可能在收到授权码后
+	// 立刻把回调文件删掉），导致授权完成后账号加不进来。
+	if handled, err := handleRaccoonCallback(os.Args[1:]); handled {
+		if err != nil {
+			log.Printf("小浣熊回调处理失败：%v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	cfgPath := "config.json"
 	cfg, err := config.Load(cfgPath)
@@ -592,6 +608,63 @@ func main() {
 	// Run 返回 = 托盘图标已回收，停机清理后进程自然退出。
 	stop()
 	appInst.Stop()
+}
+
+// handleRaccoonCallback 处理 `--raccoon-callback <深链>` 这一**非守护**入口。
+//
+// 背景：小浣熊登录期间会把 HKCU 的 `office-raccoon` 协议命令行临时改成
+//
+//	"<wild-work.exe>" --raccoon-callback "%1"
+//
+// 用户授权完成后 Windows 按该命令行再拉起一份本 exe。该子进程的**唯一职责**
+// 是把深链解析后原子落盘（raccoon.SaveCallback），由常驻 daemon 的轮询读取。
+//
+// 返回 handled=true 表示本次进程是回调子进程（调用方应直接退出）；
+// err 非 nil 时仍属 handled（已接管，只是落盘失败）。
+//
+// state 目录取自 config.json 的 state_file 所在目录；config 读不到时退回
+// raccoon 包的默认值（./data），与 config.Default 一致。
+func handleRaccoonCallback(args []string) (handled bool, err error) {
+	// 只认「第一个参数恰为 CallbackFlag」：避免把深链里的字符串误判成入口。
+	if len(args) == 0 || args[0] != raccoon.CallbackFlag {
+		return false, nil
+	}
+
+	stateDir := ""
+	if cfg, cerr := config.Load("config.json"); cerr == nil && cfg != nil {
+		stateDir = filepath.Dir(cfg.StateFile)
+	}
+	// Windows 的 windowsgui 构建**无控制台**，stderr 看不到——把结果追写到
+	// data/app.log（与 daemon 同一文件、O_APPEND 个位数写入安全），否则回调失败时
+	// 用户与运维都无任何线索（只能看到主进程 5 分钟后「登录超时」）。
+	defer func() {
+		msg := "raccoon 回调已落盘（等待主进程兑换 token）"
+		if err != nil {
+			msg = "raccoon 回调处理失败：" + err.Error()
+		}
+		appendCallbackLog(raccoon.StateDir(stateDir), msg)
+	}()
+
+	if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+		return true, errors.New("缺少深链参数")
+	}
+	if serr := raccoon.SaveCallback(stateDir, args[1]); serr != nil {
+		return true, serr
+	}
+	return true, nil
+}
+
+// appendCallbackLog 追写一行到 <stateDir>/app.log（失败静默，日志不能反过来阻断主流程）。
+func appendCallbackLog(stateDir, msg string) {
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(stateDir, "app.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006/01/02 15:04:05.000000"), msg)
 }
 
 // workDir 解析数据目录（config.json / auths/ / data/ 的落点）。

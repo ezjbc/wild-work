@@ -46,7 +46,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.6.0"
+const Version = "2.6.1"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -96,7 +96,11 @@ type App struct {
 	loginClient  *http.Client
 	loginStateFP string
 	loginKind    provider.Kind
-	pricingFP    string
+	// loginErr 上一次登录流程的终态错误（成功/取消/超时为空串）。
+	// 面板的登录轮询只看 login_busy 就宣告「登录完成」，于是失败也会显示成功——
+	// 必须把真实结果带出去（否则用户只看到「登录完成」但账号没加进来）。
+	loginErr  string
+	pricingFP string
 
 	// 智谱清言自动登录会话（独立于通用 OAuth 登录流程：
 	// 它不轮询 state 文件，而是经 CDP 从浏览器 Cookie 捕获凭据）。
@@ -499,6 +503,7 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		a.loginClient = login.NewClient()
 	}
 	a.loginBusy = true
+	a.loginErr = ""
 	a.muLogin.Unlock()
 
 	var authURL string
@@ -586,11 +591,13 @@ func (a *App) pollLogin(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			log.Printf("登录已取消")
+			a.setLoginError("登录已取消")
 			return
 		case <-t.C:
 		}
 		if time.Now().After(deadline) {
 			log.Printf("登录超时，请重新发起")
+			a.setLoginError("登录超时（未收到授权回调），请重新发起登录")
 			return
 		}
 		if a.loginKind == provider.TraeWork {
@@ -669,6 +676,7 @@ func (a *App) pollLogin(ctx context.Context) {
 				// 终态错误（回调不可用 / 授权码兑换失败）：立即结束轮询，
 				// 由 defer 恢复注册表；继续轮询只会重复报同一个错。
 				log.Printf("raccoon login poll failed: %v", err)
+				a.setLoginError("登录失败：" + err.Error())
 				return
 			}
 			continue
@@ -1082,6 +1090,24 @@ func (a *App) finishLogin() {
 	a.loginCtx, a.loginCancel, a.loginClient = nil, nil, nil
 	a.loginKind = ""
 	a.muLogin.Unlock()
+}
+
+// setLoginError 记录本次登录的终态错误（供面板展示）。调用方需持有 a.muLogin 或在其外调用。
+func (a *App) setLoginError(msg string) {
+	a.muLogin.Lock()
+	a.loginErr = msg
+	a.muLogin.Unlock()
+}
+
+// peekLoginError 读取本次登录的终态错误（不清空）。
+//
+// 故意**非破坏式**：`/api/state` 有多个调用方（页面加载、其他轮询），
+// 若读取即清空，面板的登录轮询可能拿不到而被别的调用偷走，toast 就永远不显示了。
+// 由下一次 startLogin 置空。
+func (a *App) peekLoginError() string {
+	a.muLogin.Lock()
+	defer a.muLogin.Unlock()
+	return a.loginErr
 }
 
 // reloadAccounts 用 auths 目录最新文件对齐账号池。
@@ -1905,6 +1931,7 @@ type State struct {
 	AuthRequired bool   `json:"auth_required"` // 当前监听地址是否必须配置密码（非环回）
 
 	LoginBusy   bool   `json:"login_busy"`
+	LoginError  string `json:"login_error"` // 上次登录终态错误（非空时面板提示失败而非「登录完成」）
 	NextCheckin string `json:"next_checkin"`
 	Version     string `json:"version"`
 	Autostart   bool   `json:"autostart"`
@@ -1951,6 +1978,7 @@ func (a *App) GetState() State {
 		AuthSession:    session,
 		AuthRequired:   requireRemoteAuth(listen),
 		LoginBusy:      a.LoginBusy(),
+		LoginError:     a.peekLoginError(),
 		NextCheckin:    fmtTime(a.nextFire()),
 		Version:        Version,
 		Autostart:      a.AutostartEnabled(),

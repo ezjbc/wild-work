@@ -817,6 +817,12 @@ function startLoginPoll() {
       if (!st.login_busy) {
         stopLoginPoll();
         $("loginOverlay").classList.add("hidden");
+        // 后端在 login_error 里回传终态失败（超时/回调不可用/兑换失败）；
+        // 拿不到就是真的成功了。
+        if (st.login_error) {
+          toast(st.login_error, 8000);
+          return;
+        }
         toast("登录完成，正在同步账号…");
         await loadState();
         refreshFees();
