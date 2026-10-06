@@ -255,6 +255,7 @@ function render() {
   renderTopbar();
   renderSummary();
   renderAccounts();
+  applyAcctFilter();
   renderTimes();
 }
 
@@ -381,8 +382,15 @@ function renderSummary() {
         + (c.unusable > 0 ? `<span class="cs-unu" title="账号名下、本工具不可消耗的额度（不计入合计）">不可用${fmt(c.unusable)}</span>` : "")
         + (c.stale > 0 ? `<span class="cs-stale" title="部分账号余额待刷新">${c.stale} 待刷新</span>` : "");
     }
-    html += `<span class="cs-chip"><span class="badge ${chClass(k)}">${esc(chLabel(k))}</span>`
+    const on = acctFilter === k ? " on" : "";
+    html += `<span class="cs-chip clickable${on}" data-wg="${esc(k)}" role="button" tabindex="0"`
+      + ` title="点击筛选该渠道账号，再次点击取消"><span class="badge ${chClass(k)}">${esc(chLabel(k))}</span>`
       + `<span class="cs-n">${c.n}号</span>${body}</span>`;
+  }
+  // 「全部」重置项：仅在有筛选时出现，点击清除筛选。整条不参与合计，故放在合计 chip 之前。
+  if (acctFilter) {
+    html += `<span class="cs-chip clickable cs-all" data-wg="" role="button" tabindex="0" title="显示全部账号">`
+      + `<span class="cs-n">全部</span></span>`;
   }
   html += `<span class="cs-chip cs-total" title="各渠道可用积分合计（不含「不可用」与匿名通道）">`
     + `<span class="cs-title">合计</span><span class="cs-num">${fmt(total)}</span>`
@@ -390,6 +398,49 @@ function renderSummary() {
     + (staleChs > 0 ? `<span class="cs-stale" title="有渠道整体待刷新，未计入合计">${staleChs} 渠道待刷新</span>` : "")
     + `</span>`;
   el.innerHTML = html;
+}
+
+// acctFilter 账号筛选状态：null = 全部；否则为渠道 key（provider.Kind）。
+// 汇总条 chip 与账号卡片同源于 state.accounts，点某个渠道 chip 即筛选其账号卡片。
+let acctFilter = null;
+
+// applyAcctFilter 按 acctFilter 显示/隐藏账号卡片（与汇总条 chip 联动）。
+// 逐张卡片读徽章的渠道类名反查（卡片本身不带 data-group，避免改动 renderAccounts 的既有结构）。
+function applyAcctFilter() {
+  const grid = $("acctList");
+  if (!grid) return;
+  grid.querySelectorAll(".acct-card").forEach((card) => {
+    const badge = card.querySelector(".acct-top .badge");
+    const key = badge ? (CLS_KIND[badge.classList[1]] || "") : "";
+    const show = !acctFilter || key === acctFilter;
+    card.classList.toggle("hidden", !show);
+  });
+}
+
+// CLS_KIND 徽章 CSS 短类名 → 渠道 key 的反查表（与 CH_CLASS 互逆）。
+const CLS_KIND = {};
+for (const k of Object.keys(CH_CLASS)) CLS_KIND[CH_CLASS[k]] = k;
+
+// setAcctFilter 设置筛选并同步汇总条高亮与账号卡片可见性。
+function setAcctFilter(kind) {
+  acctFilter = (acctFilter === kind) ? null : kind; // 再次点击同一渠道 = 取消
+  renderSummary();
+  applyAcctFilter();
+}
+
+// bindSummaryFilter 汇总条 chip 点击/键盘筛选（事件委托，绑定一次）。
+function bindSummaryFilter() {
+  const el = $("creditSummary");
+  if (!el) return;
+  const pick = (target) => {
+    const chip = target.closest(".cs-chip.clickable");
+    if (!chip) return;
+    setAcctFilter(chip.dataset.wg || null);
+  };
+  el.addEventListener("click", (e) => pick(e.target));
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(e.target); }
+  });
 }
 function renderAccounts() {
   const grid = $("acctList");
@@ -1581,6 +1632,7 @@ function bindMainTabs() {
   });
 
   bindFeesTabs(); // 费率面板渠道标签切换（事件委托一次绑定）
+  bindSummaryFilter(); // 积分汇总条 chip 点击筛选账号（事件委托一次绑定）
 }
 
 // 面板 tab / 范围切换事件（bind 末尾调用）
