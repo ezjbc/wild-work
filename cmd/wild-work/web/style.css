@@ -298,6 +298,25 @@ body {
   line-height: 15px;
 }
 .fees-tab.active .fees-tab-n { color: var(--primary); background: #dbeafe; }
+/* 渠道积分余额角标：tab 内显示该渠道可用积分合计（与汇总条同源） */
+.fees-tab .fees-tab-bal {
+  font-size: 10.5px;
+  color: #15803d;
+  background: #dcfce7;
+  border: 1px solid #bbf7d0;
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
+}
+/* 模型名可点击复制（整段 code 作为按钮） */
+.fees code.fee-model-copy {
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.fees code.fee-model-copy:hover { background: #eff6ff; color: var(--primary); }
+.fees code.fee-model-copy:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .fees td.dim { color: var(--muted); font-size: 12px; }
 /* 倍率显示：Free 高亮 / 已定价 / 未知（带 tooltip） */
 .fees .rate-free {
