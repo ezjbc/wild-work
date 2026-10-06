@@ -18,6 +18,8 @@ import (
 	"wild-work/internal/ledger"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
+	// 别名 statsEngine：与运行统计引擎包名一致（本包无同名局部变量，别名仅为与 app 包对齐可读）
+	statsEngine "wild-work/internal/stats"
 )
 
 // Runtime 是一个平台的一组运行时资源：pool + upstream + 静态模型兜底。
@@ -67,6 +69,9 @@ type Config struct {
 	// Ledger 用量/积分流水记账器（非 nil 时成功请求记 token 流水）。
 	Ledger *ledger.Ledger
 
+	// Stats 运行统计引擎（非 nil 时转发请求插桩 AddUsage/AddRequestRow；见 internal/stats 包注释）。
+	Stats *statsEngine.Stats
+
 	MaxRotate    int
 	HardCooldown time.Duration
 	SoftCooldown time.Duration
@@ -89,7 +94,8 @@ type Handler struct {
 	cfg Config
 	mux *http.ServeMux
 
-	ledger *ledger.Ledger // 记账器（cfg.Ledger 透传，nil = 不记账）
+	ledger *ledger.Ledger     // 记账器（cfg.Ledger 透传，nil = 不记账）
+	stats  *statsEngine.Stats // 运行统计引擎（cfg.Stats 透传，nil = 不插桩）
 
 	apiMu    sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
 	stickyMu sync.RWMutex
@@ -120,7 +126,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -201,6 +207,29 @@ func (h *Handler) stickyClear(rt *Runtime) {
 	h.stickyMu.Lock()
 	defer h.stickyMu.Unlock()
 	delete(h.sticky, h.stickyKey(rt.Kind))
+}
+
+// StickyState 粘性路由快照片段（运行统计喂入用）。
+type StickyState struct {
+	UID   string
+	Count int // 已连续成功请求数
+	Max   int // 轮换阈值（默认 50）
+}
+
+// StickySnapshot 返回粘性路由快照（key = 渠道名，即 provider.Kind.String()）。
+// 供运行统计引擎喂 ApplySticky——进程内直读取代 sidecar 对粘性日志行的解析；
+// 无粘性记录的渠道不出现在结果里。
+func (h *Handler) StickySnapshot() map[string]StickyState {
+	h.stickyMu.RLock()
+	defer h.stickyMu.RUnlock()
+	out := make(map[string]StickyState, len(h.sticky))
+	for k, e := range h.sticky {
+		if e == nil || e.uid == "" {
+			continue
+		}
+		out[k] = StickyState{UID: e.uid, Count: e.reqCount, Max: e.maxReqs}
+	}
+	return out
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -424,6 +453,31 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 运行统计插桩：每客户端请求一行（最终结果；中间换号尝试不逐行——对齐 sidecar 口径）。
+	// TTFB 由 statWriter 记首字节，耗时/吞吐在出口由 defer 收口；
+	// Status 未显式赋值 = 成功写回（200）。
+	var statRow statsEngine.ReqRow
+	statRow.Model = clientModel
+	if peek.Stream {
+		statRow.Mode = "流"
+	} else {
+		statRow.Mode = "非流"
+	}
+	sw := &statWriter{ResponseWriter: w, start: time.Now()}
+	w = sw // 此后所有写出（流式/非流式/透传错误）统一经 sw 计时
+	if h.stats != nil {
+		defer func() {
+			now := time.Now()
+			statRow.Time = now.Format("01-02 15:04:05")
+			statRow.TTFBMs = sw.ttfbMs
+			statRow.TotalSec = now.Sub(sw.start).Seconds()
+			if statRow.Status == 0 {
+				statRow.Status = http.StatusOK
+			}
+			h.stats.AddRequestRow(statRow)
+		}()
+	}
+
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < h.cfg.MaxRotate; i++ {
@@ -468,6 +522,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 会让整条渠道下线（且无号可轮换）。直接透传错误，重试交给客户端。
 				log.Printf("upstream transport error platform=%s uid=%s（单账号渠道不计错）err=%v",
 					rt.Kind, acct.UID, terr)
+				statRow.Status = http.StatusBadGateway
 				writeOpenAIError(w, http.StatusBadGateway, "upstream_error", terr.Error())
 				return
 			}
@@ -475,6 +530,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if status >= 400 {
+			statRow.Status = status // 所有透传出口（单账号/请求级/惩罚后）共用
 			h.stickyClear(rt)
 			kind := rt.Upstream.Classify(status, string(respBody))
 			// 单账号渠道：任何账号级惩罚都等于整条渠道下线，故一律原文透传、不罚账号。
@@ -535,6 +591,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.ledger.AppendUsage(ledger.UsageEntry{Ch: rt.Kind.String(), UID: acct.UID,
 					Model: stripChannel(clientModel), PT: pt, CT: ct, Src: src})
 			}
+			// 运行统计：模型维度记账（有 usage 才计，对齐 sidecar 的 u.found 语义）。
+			// 吞吐仅在流式下有意义：genSec = 总耗时 − TTFB；引擎内对 ≤50ms 的样本只计 TTFB。
+			if h.stats != nil {
+				pt, ct, _ := usageTokens(usage)
+				if pt > 0 || ct > 0 {
+					gen := time.Since(sw.start).Seconds() - float64(sw.ttfbMs)/1000
+					h.stats.AddUsage(clientModel, pt, ct, usageCredit(usage), sw.ttfbMs, gen, time.Now())
+					statRow.Tok = ct
+					if gen > 0 {
+						statRow.TokPerSec = float64(ct) / gen
+					}
+				}
+				statRow.Credit = usageCredit(usage)
+			}
 			if serr != nil {
 				// 上游中断/空流已尽力透传，错误仅在日志可见
 				log.Printf("stream relay end platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
@@ -568,6 +638,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		resp, err := rt.Upstream.Aggregate(rc, clientModel)
 		if err != nil {
+			statRow.Status = http.StatusBadGateway
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			return
 		}
@@ -578,10 +649,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				Model: stripChannel(clientModel), PT: pt, CT: ct, Src: src})
 		}
 		writeJSON(w, http.StatusOK, resp)
+		// 运行统计：必须在写回之后——此刻 statWriter 才记到首字节，TTFB 为真值；
+		// 一次性写回 gen≈0 由引擎 50ms 守卫兜底（只计 TTFB 不计吞吐——非流式本无吞吐样本，
+		// 若在写回前取值会把 ttfb=0/gen=端到端总时长喂进引擎，污染 AvgTTFB 与吞吐均值）。
+		if h.stats != nil {
+			u, _ := resp["usage"].(map[string]any)
+			pt, ct, _ := usageTokens(u)
+			if pt > 0 || ct > 0 {
+				gen := time.Since(sw.start).Seconds() - float64(sw.ttfbMs)/1000
+				h.stats.AddUsage(clientModel, pt, ct, usageCredit(u), sw.ttfbMs, gen, time.Now())
+				statRow.Tok = ct
+			}
+			statRow.Credit = usageCredit(u)
+		}
 		return
 	}
 	// 渠道没有可用账号：区分「未绑定账号」与「全部冷却/禁用」，给出可操作的引导。
 	// 客户端（如 Claude Code/Codex）只看到这条错误，必须足以让用户知道去面板做什么。
+	statRow.Status = http.StatusServiceUnavailable
 	sts := rt.Pool.List()
 	var bound, disabled, cooling int
 	for _, s := range sts {
@@ -678,6 +763,49 @@ func stripChannel(model string) string {
 		return model[i+1:]
 	}
 	return model
+}
+
+// usageCredit 从 usage 对象取上游下发的单次积分（WorkBuddy 系会回；
+// TraeWork 系 token_usage 帧无此字段 → 0，引擎侧按渠道余额差值分摊估算）。
+func usageCredit(u map[string]any) float64 {
+	if v, ok := u["credit"].(float64); ok {
+		return v
+	}
+	return 0
+}
+
+// statWriter 记录首字节写出时刻（TTFB 口径：客户端等到的第一个响应字节，
+// 含状态行/响应头——WriteHeader/Write/Flush 三者先到先记）。
+type statWriter struct {
+	http.ResponseWriter
+	start   time.Time
+	ttfbMs  int64
+	written bool
+}
+
+func (sw *statWriter) noteFirstByte() {
+	if !sw.written {
+		sw.written = true
+		sw.ttfbMs = time.Since(sw.start).Milliseconds()
+	}
+}
+
+func (sw *statWriter) WriteHeader(code int) {
+	sw.noteFirstByte()
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func (sw *statWriter) Write(p []byte) (int, error) {
+	sw.noteFirstByte()
+	return sw.ResponseWriter.Write(p)
+}
+
+// Flush 透传给内层 ResponseWriter（流式 SSE 依赖；首帧 flush 也算首字节时机）。
+func (sw *statWriter) Flush() {
+	sw.noteFirstByte()
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // rewriteModel 改写发往上游的请求体：修补工具轮的空 content（见
