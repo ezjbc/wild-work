@@ -135,6 +135,15 @@ body {
 .cs-stale { color: var(--warn); font-size: 11px; }
 .cs-total { background: #eef4ff; border-color: #c7d9ff; }
 .cs-total .cs-title { color: var(--primary); }
+/* 渠道 chip 可点击筛选账号：整条作为按钮，选中态加边高亮 */
+.cs-chip.clickable { cursor: pointer; }
+.cs-chip.clickable:hover { border-color: var(--primary); }
+.cs-chip.clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.cs-chip.clickable.on { border-color: var(--primary); background: #eff6ff; }
+.cs-chip.cs-all { padding: 3px 10px; }
+.cs-chip.cs-all .cs-n { color: var(--primary); }
+/* 账号筛选后隐藏的卡片（applyAcctFilter 控制） */
+.acct-grid .acct-card.hidden { display: none; }
 
 /* 账号卡片网格 */
 .acct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
