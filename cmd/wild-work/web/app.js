@@ -256,6 +256,7 @@ function render() {
   renderSummary();
   renderAccounts();
   applyAcctFilter();
+  refreshTabBalances();
   renderTimes();
 }
 
@@ -528,6 +529,45 @@ function renderTimes() {
   $("nextCheckin").textContent = state.next_checkin || "-";
 }
 
+// channelCredits 汇总某渠道全部账号的可用积分（与积分汇总条同源 state.accounts）。
+// 无该渠道账号时返回 null（前端不渲染角标，避免显示误导性的 0）。
+function channelCredits(kind) {
+  if (!state || !state.accounts) return null;
+  let sum = 0, has = false;
+  for (const a of state.accounts) {
+    if ((a.group || "workbuddy") !== kind) continue;
+    if (a.credits_na) return null; // 匿名渠道无积分概念
+    has = true;
+    sum += a.credits || 0;
+  }
+  return has ? sum : null;
+}
+
+// fmtNum 千分位整数（与汇总条的 fmt 同口径，独立命名避免作用域冲突）。
+function fmtNum(n) {
+  return n.toLocaleString("zh-CN");
+}
+
+// refreshTabBalances 就地更新费率渠道 tab 的积分余额角标。
+// 账号余额刷新远频于费率表（state 每次 loadState 都更新，fees 只在加载/手动刷新时变），
+// 若只在 renderFees 里写余额，账号刷新后角标会停在旧值。这里在每次 render() 时
+// 只改角标文本（不重建 DOM），既保持最新又不打断用户浏览/滚动。
+function refreshTabBalances() {
+  const box = $("feesBox");
+  if (!box) return;
+  box.querySelectorAll(".fees-tab[data-feech]").forEach((tab) => {
+    const bal = channelCredits(tab.dataset.feech);
+    const el = tab.querySelector(".fees-tab-bal");
+    if (bal === null) {
+      if (el) el.remove();
+      return;
+    }
+    const txt = `余额 ${fmtNum(bal)} 分`;
+    if (el) { if (el.textContent !== txt) el.textContent = txt; }
+    else { const s = document.createElement("span"); s.className = "fees-tab-bal"; s.textContent = txt; s.title = "该渠道全部账号当前可用积分合计"; tab.appendChild(s); }
+  });
+}
+
 function renderFees(fees) {
   const box = $("feesBox");
   const channels = fees.channels || [];
@@ -537,7 +577,6 @@ function renderFees(fees) {
       <div class="note">${esc(fees.disclaimer || "")}</div>`;
     return;
   }
-
   let html = `<div class="note">${esc(fees.note || "")}</div>`;
   if (fees.cached_at) html += `<div class="note">费率上次更新：${esc(fees.cached_at)}</div>`;
   if (fees.error) html += `<div class="note" style="color:var(--danger)">${esc(fees.error)}</div>`;
@@ -615,6 +654,19 @@ function renderFees(fees) {
     return ` <span class="rate-note"${style}>${esc(m.note)}</span>`;
   };
 
+  // 模型标识单元格：模型名 + 上下文/能力/促销标记。
+  // 模型名做成可点击复制（复制完整「渠道/模型」，如 workbuddy/glm-4.6），
+  // 方便直接粘进客户端配置。data-mid 存完整标识供事件委托读取；
+  // 保留原有 title（模型详情）并在其后追加一行复制提示。
+  const modelIdCell = (m, kind) => {
+    if (!m) return "";
+    const mid = `${kind}/${m.model}`;
+    const copyTip = `点击复制：${mid}`;
+    const title = `${modelTip(m)}\n${copyTip}`;
+    return `<code class="fee-model-copy" data-mid="${esc(mid)}" role="button" tabindex="0" title="${esc(title)}">${esc(m.model)}</code>`
+      + `${ctxTag(m)}${capIcons(m)}${noteCell(m)}`;
+  };
+
   // 渠道多标签：每个渠道一个 tab，panel 内双列模型布局不变（issue：费率表太长）。
   // 记住上次选中的渠道，重渲染后自动恢复（后台刷新不打断用户浏览）。
   if (!renderFees.lastCh) renderFees.lastCh = channels[0].channel;
@@ -628,8 +680,13 @@ function renderFees(fees) {
   for (const ch of channels) {
     const n = (ch.models || []).length;
     const on = ch.channel === active ? " active" : "";
+    // 渠道积分余额角标：取自 state.accounts（与积分汇总条同源），
+    // 让用户在选择渠道时即可看到「这个渠道还有多少积分可用」。
+    const bal = channelCredits(ch.channel);
+    const balHtml = bal === null ? ""
+      : `<span class="fees-tab-bal" title="该渠道全部账号当前可用积分合计">余额 ${fmtNum(bal)} 分</span>`;
     html += `<button class="fees-tab${on}" data-feech="${esc(ch.channel)}"
-      title="${esc(chLabel(ch.channel))}">${esc(chLabel(ch.channel))}<span class="fees-tab-n">${n}</span></button>`;
+      title="${esc(chLabel(ch.channel))}">${esc(chLabel(ch.channel))}<span class="fees-tab-n">${n}</span>${balHtml}</button>`;
   }
   html += `</div>`;
 
@@ -642,9 +699,7 @@ function renderFees(fees) {
     for (let i = 0; i < models.length; i += 2) {
       const m1 = models[i];
       const m2 = models[i + 1];
-      const id1 = m1 ? `<code title="${esc(modelTip(m1))}">${esc(m1.model)}</code>${ctxTag(m1)}${capIcons(m1)}${noteCell(m1)}` : "";
-      const id2 = m2 ? `<code title="${esc(modelTip(m2))}">${esc(m2.model)}</code>${ctxTag(m2)}${capIcons(m2)}${noteCell(m2)}` : "";
-      html += `<tr><td>${id1}</td><td>${rateCell(m1)}</td><td>${id2}</td><td>${rateCell(m2)}</td></tr>`;
+      html += `<tr><td>${modelIdCell(m1, ch.channel)}</td><td>${rateCell(m1)}</td><td>${modelIdCell(m2, ch.channel)}</td><td>${rateCell(m2)}</td></tr>`;
     }
     html += `</tbody></table></div>`;
   }
@@ -658,6 +713,12 @@ function renderFees(fees) {
 function bindFeesTabs() {
   const box = $("feesBox");
   box.addEventListener("click", (e) => {
+    // 模型名点击复制优先判定：code.fee-model-copy 不是 .fees-tab，互不冲突。
+    const code = e.target.closest("code.fee-model-copy");
+    if (code && box.contains(code)) {
+      copyText(code.dataset.mid, "模型名");
+      return;
+    }
     const btn = e.target.closest(".fees-tab");
     if (!btn) return;
     const ch = btn.dataset.feech;
@@ -667,6 +728,12 @@ function bindFeesTabs() {
         if (p.dataset.feepanel === ch) { p.classList.remove("hidden"); }
         else { p.classList.add("hidden"); }
       });
+  });
+  // 键盘可达：模型名支持 Enter/Space 复制（与 role="button" 对应）。
+  box.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const code = e.target.closest("code.fee-model-copy");
+    if (code && box.contains(code)) { e.preventDefault(); copyText(code.dataset.mid, "模型名"); }
   });
 }
 
