@@ -480,6 +480,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	// 最后一次上游错误的原始 status+body：候选耗尽时原样透传（而非包装成 503），
+	// 客户端才能看到 6004 重置时间等上游细节。内容类错误在循环内已提前透传，不受影响。
+	var lastStatus int
+	var lastBody []byte
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		acct := h.pickWithSticky(rt)
 		if acct == nil {
@@ -546,7 +550,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			case provider.ErrHardCredit:
 				rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.cfg.HardCooldown, "余额/权益不足")
 			case provider.ErrSoftRate:
-				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
+				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.softRateCooldown(string(respBody)), "429 rate limit")
 			case provider.ErrSessionDead:
 				rt.Pool.Disable(acct.UID, "session dead")
 			case provider.ErrNotFound:
@@ -559,8 +563,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			case provider.ErrWafBlock, provider.ErrAccountFault, provider.ErrModelBlocked:
 				// 账号级风控/故障/模型不存在：软冷却，不累计错误计数。
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, kind.String())
-				transparentError(w, status, respBody)
-				return
+				if kind != provider.ErrAccountFault {
+					transparentError(w, status, respBody)
+					return
+				}
 			case provider.ErrServer:
 				if rt.NoCooldownOnServerError {
 					// 该渠道声明 5xx 为上游网关抖动（账号本身健康），
@@ -573,10 +579,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			default:
 				rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			}
-			// 上游错误直接透传给客户端，不做包装
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
-			_, _ = w.Write(respBody)
+			// 账号级错误（限流/欠费/登录态死/5xx/账号故障等）：换下一个账号重试本请求，
+			// 全部候选耗尽后才把最后一个上游错误透传给客户端（-p4 前此处直接 return，
+			// 导致客户端看到本可避免的 429/402）。内容类错误在上方 case 中已提前返回。
+			if kind.Rotatable() {
+				log.Printf("rotate platform=%s uid=%s kind=%s status=%d body=%s",
+					rt.Kind, acct.UID, kind, status, truncateBody(respBody))
+				lastErr = fmt.Errorf("upstream %s (http %d): %s", kind, status, truncateBody(respBody))
+				lastStatus = status
+				lastBody = respBody
+				continue
+			}
+			transparentError(w, status, respBody)
 			return
 		}
 		defer rc.Close()
@@ -666,6 +680,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	// 渠道没有可用账号：区分「未绑定账号」与「全部冷却/禁用」，给出可操作的引导。
 	// 客户端（如 Claude Code/Codex）只看到这条错误，必须足以让用户知道去面板做什么。
+	// 候选耗尽但轮换中有上游错误：优先透传最后一个上游原始响应（保持上游语义，
+	// 如 429+6004 重置时间；本次请求确实逐号尝试过，包装成 503 反而丢信息）。
+	if lastStatus > 0 && lastBody != nil {
+		transparentError(w, lastStatus, lastBody)
+		return
+	}
 	statRow.Status = http.StatusServiceUnavailable
 	sts := rt.Pool.List()
 	var bound, disabled, cooling int
@@ -978,6 +998,65 @@ func transparentError(w http.ResponseWriter, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+}
+
+// softRateResetMaxCap 解析出的重置时长上限：上游时间戳异常（如错给一年后）时不至于把号冻死。
+const softRateResetMaxCap = 24 * time.Hour
+
+// softRateCooldown 从限流响应体提取真实重置时间，冷却到该时刻（而非固定 60s）。
+// 命中形态：WorkBuddy 6004「...将在 2026-09-23 14:47:19 UTC+8 重置...」——该类限流
+// 按重置点解封，60s 软冷却过期后账号会被反复选中反复 429。解析失败/时长为非正值时
+// 回退默认 SoftCooldown。时间戳按 UTC+8 墙钟解析，与到期字段口径一致（AGENTS §6.18）。
+// 已知形态「2026-09-23 14:47:19」可能带「UTC+8」后缀，解析前剥掉。
+func (h *Handler) softRateCooldown(body string) time.Duration {
+	ts, ok := softRateResetTs(body)
+	if !ok {
+		return h.cfg.SoftCooldown
+	}
+	d := time.Until(ts)
+	if d <= 0 {
+		return h.cfg.SoftCooldown
+	}
+	if d > softRateResetMaxCap {
+		d = softRateResetMaxCap
+	}
+	return d
+}
+
+// softRateResetTs 提取「将在 <ts> 重置」中的时间戳（UTC+8 墙钟）；未命中返回 false。
+func softRateResetTs(body string) (time.Time, bool) {
+	const marker = "将在 "
+	i := strings.Index(body, marker)
+	if i < 0 {
+		return time.Time{}, false
+	}
+	rest := body[i+len(marker):]
+	end := strings.Index(rest, " 重置")
+	if end < 0 {
+		return time.Time{}, false
+	}
+	s := strings.TrimSpace(rest[:end])
+	// 「UTC+8」是时区说明而非时间一部分（layout 无法解析），剥掉
+	if suffix := " UTC+8"; strings.HasSuffix(s, suffix) {
+		s = strings.TrimSuffix(s, suffix)
+	}
+	const layout = "2006-01-02 15:04:05"
+	loc := time.FixedZone("UTC+8", 8*3600)
+	reset, err := time.ParseInLocation(layout, s, loc)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return reset, true
+}
+
+// truncateBody 错误日志/聚合 lastErr 用的响应体摘要。
+func truncateBody(body []byte) string {
+	const max = 200
+	s := string(body)
+	if len(s) > max {
+		return s[:max]
+	}
+	return s
 }
 
 func WorkBuddyStaticModels() []provider.ModelInfo {
