@@ -42,6 +42,8 @@ import (
 	"wild-work/internal/raccoon"
 	"wild-work/internal/scheduler"
 	"wild-work/internal/server"
+	// 别名 statsEngine：/api/usage handler 内有同名局部变量 stats（遮蔽包名）
+	statsEngine "wild-work/internal/stats"
 	"wild-work/internal/systray"
 )
 
@@ -131,6 +133,11 @@ type App struct {
 	ledger     *ledger.Ledger
 	ledgerStop chan struct{}
 
+	// stats 运行统计引擎（data/stats.json）：面板「运行统计」tab 的数据面，
+	// 数据注入全部进程内直调（见 internal/stats 包注释与 AGENTS.md R13）；nil = 未启用
+	stats     *statsEngine.Stats
+	statsStop chan struct{}
+
 	pricingMu      sync.Mutex
 	pricingCache   []provider.ModelPricing // 本地缓存
 	pricingFetched time.Time
@@ -161,6 +168,15 @@ func New(opts Options) (*App, error) {
 	if a.ledger != nil {
 		a.ledgerStop = make(chan struct{})
 		go a.ledger.AutoFlush(a.ledgerStop)
+	}
+
+	// 运行统计引擎（data/stats.json）：初始化失败不致命——端点回 disabled、插桩/喂入全判 nil
+	if st, err := statsEngine.New(filepath.Dir(opts.Config.StateFile), log.Printf); err == nil {
+		a.stats = st
+		a.statsStop = make(chan struct{})
+		go st.RunFlusher(a.statsStop)
+	} else {
+		log.Printf("stats init failed（运行统计不可用）: %v", err)
 	}
 
 	// 日志文件 data/app.log
@@ -214,6 +230,18 @@ func (a *App) Close() {
 	if a.ledger != nil {
 		a.ledger.Close()
 	}
+	// 停统计引擎并同步冲刷：RunFlusher 的 stop 分支是异步收尾，
+	// 进程退出路径必须 FlushNow 兜底（os.Exit 抢跑会丢最后几秒快照）
+	if a.statsStop != nil {
+		select {
+		case <-a.statsStop:
+		default:
+			close(a.statsStop)
+		}
+	}
+	if a.stats != nil {
+		a.stats.FlushNow()
+	}
 	if a.logFile != nil {
 		_ = a.logFile.Close()
 		a.logFile = nil
@@ -222,6 +250,9 @@ func (a *App) Close() {
 
 // Ledger 返回流水记账器（未启用时 nil；供 main 装配传给 server handler）。
 func (a *App) Ledger() *ledger.Ledger { return a.ledger }
+
+// Stats 返回运行统计引擎（未启用时 nil；供 main 装配传给 server handler 插桩）。
+func (a *App) Stats() *statsEngine.Stats { return a.stats }
 
 func (a *App) runtime(kind provider.Kind) *Runtime {
 	if a.runtimes == nil {
@@ -1310,6 +1341,8 @@ func (a *App) creditTotals(rt *Runtime, au *auth.Auth) (usable, expiring, unusab
 	if a.ledger != nil {
 		a.ledger.DiffCredits(rt.Kind.String(), au.UID, remain, items)
 	}
+	// 运行统计：账号最近临期喂入（复用同一响应的 items，免二次上游调用）
+	a.applyExpiryFromItems(au.UID, items)
 	return remain, expiring, unusable, nil
 }
 
@@ -1332,6 +1365,9 @@ func (a *App) StartCreditAutoRefresh(ctx context.Context, kinds []provider.Kind,
 				}
 				for _, st := range rt.Pool.List() {
 					if st.Disabled {
+						// 停用账号不再刷资源：清掉引擎里的临期残留（sidecar 对 disabled 账号
+						// 仍轮询 resource；此处写空值达到同等效果，防「最近临期」行冻结旧值）
+						a.applyExpiryFromItems(st.UID, nil)
 						continue
 					}
 					au := rt.Pool.AuthByUID(st.UID)
@@ -2465,6 +2501,27 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"lines": lines})
 	})
+	// 运行统计面板（web 第三个 tab）：快照 = internal/stats 引擎的实时聚合，
+	// 载荷字段与 sidecar /capi/stats 对齐（前端 PR2 已按契约轮询）。
+	mux.HandleFunc("GET /api/stats", func(w http.ResponseWriter, r *http.Request) {
+		if a.stats == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"disabled": true})
+			return
+		}
+		writeJSON(w, http.StatusOK, a.stats.Snapshot(time.Now()))
+	})
+	// 请求日志（最近 N 条，默认 15；rows 形状对齐 sidecar /capi/logs）
+	mux.HandleFunc("GET /api/stats/logs", func(w http.ResponseWriter, r *http.Request) {
+		if a.stats == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"rows": []any{}})
+			return
+		}
+		limit := 15
+		if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+			limit = n
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"rows": a.stats.Logs(limit)})
+	})
 	mux.HandleFunc("POST /api/quit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		go a.safeGo(func() { a.Quit() })
@@ -2798,6 +2855,12 @@ type logWriter struct{ app *App }
 func (w *logWriter) Write(p []byte) (int, error) {
 	if w.app.logFile != nil {
 		_, _ = w.app.logFile.Write(p)
+	}
+	// 运行统计：签到事件实时喂入（log 库单次 Write 即完整一行；非事件行
+	// 只做至多 5 个锚定正则匹配即跳过，开销可忽略。与启动时的全量
+	// RescanEventLog 按 uid|day 幂等去重，不会双计）
+	if w.app.stats != nil {
+		w.app.stats.ObserveLogLine(string(p))
 	}
 	return len(p), nil
 }

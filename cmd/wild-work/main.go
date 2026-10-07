@@ -438,6 +438,7 @@ func main() {
 		Runtimes:     runtimes,
 		APIKey:       cfg.APIKey,
 		Ledger:       appInst.Ledger(),
+		Stats:        appInst.Stats(), // 转发路径插桩 AddUsage/AddRequestRow（运行统计）
 		HardCooldown: cfg.HardCreditDur,
 		SoftCooldown: cfg.SoftRateDur,
 		ErrThreshold: cfg.Cooldown.ErrThresh,
@@ -544,6 +545,10 @@ func main() {
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。
 	// 否则刚启动时费率缓存为空，面板下方全是 unknown（需手动点刷新才正常）。
 	appInst.StartPricingAutoRefresh(sctx, app.PricingRefreshInterval)
+
+	// 运行统计喂入器（账号状态差值/粘性路由/今日作废，30s 一轮）：
+	// 进程内直调各数据源，面板「运行统计」tab 即时可用。
+	appInst.StartStatsFeeders(sctx)
 
 	// 启动提示（非 --autostart）：系统通知
 	if !autostart && !noTray {
