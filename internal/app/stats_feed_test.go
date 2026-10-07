@@ -116,10 +116,12 @@ func TestStatsEndpoints(t *testing.T) {
 }
 
 // TestLogWriterObserveEvents 日志实时喂入：logWriter.Write 的签到事件行进引擎（事件口径收入）。
+// 日志行日期必须动态取当日：引擎只把「今日」的签到事件计入 CreditIn，硬编码日期会在
+// 次日直接失败（PR #73 原本写死 2026/10/06，合入当天就已失效）。
 func TestLogWriterObserveEvents(t *testing.T) {
 	a := newPanelApp(t, "127.0.0.1", "")
 	lw := &logWriter{app: a}
-	line := "2026/10/06 12:00:00.000 checkin platform=workbuddy uid=wb-1 ok=true msg=签到成功 remain=100 has_remain=true"
+	line := time.Now().Format("2006/01/02") + " 12:00:00.000 checkin platform=workbuddy uid=wb-1 ok=true msg=签到成功 remain=100 has_remain=true"
 	if _, err := lw.Write([]byte(line)); err != nil {
 		t.Fatalf("logWriter.Write: %v", err)
 	}
