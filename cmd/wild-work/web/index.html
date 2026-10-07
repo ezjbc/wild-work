@@ -40,6 +40,7 @@
     <div class="main-tabs">
       <button class="mtab active" data-mtab="accounts">账号管理</button>
       <button class="mtab" data-mtab="usage">用量与流水 <span class="ver" id="usageSince"></span></button>
+      <button class="mtab" data-mtab="stats">运行统计</button>
     </div>
 
     <!-- ===== Tab: 账号管理 ===== -->
@@ -112,6 +113,30 @@
         <button class="btn small" id="pgNext">下一页 ›</button>
       </div>
       <div id="recentList" class="recent"></div>
+    </div>
+    </div>
+
+    <!-- ===== Tab: 运行统计（数据来自 /api/stats + /api/stats/logs + /api/logs） ===== -->
+    <div class="mtab-body hidden" id="mtabStats">
+    <div class="st-panel">
+      <div class="st-sec-head"><span>今日情况</span><div class="st-token" id="stToken"></div><span class="st-sec-info" id="stMilestone"></span><span class="st-sec-info" id="stUpdated"></span></div>
+      <div class="st-sum" id="stSum"></div>
+      <div class="st-plat" id="stPlat"></div>
+    </div>
+    <div class="st-rotation" id="stRotation"></div>
+    <div class="st-expiry" id="stExpiry"></div>
+    <div class="st-block">
+      <div class="st-block-title">模型消耗（今日）<span class="st-hint">按积分降序 · TraeWork ≈ 按渠道真实消耗分摊 · 速度为成功请求实测均值</span></div>
+      <div class="st-scroll st-scroll-4"><table class="st-table st-models" id="stModels"></table></div>
+    </div>
+    <div class="st-abnormal" id="stAbnormal"></div>
+    <div class="st-block">
+      <div class="st-block-title">请求日志（最近 15 条）</div>
+      <div class="st-scroll st-scroll-4"><table class="st-table st-logs" id="stLogs"></table></div>
+    </div>
+    <div class="st-panel">
+      <div class="st-sec-head"><span>运行日志</span><span class="st-sec-info">app.log 最近 200 行 · 15s 刷新</span></div>
+      <div class="st-logbox" id="stApplog"><div class="st-empty">加载中…</div></div>
     </div>
     </div>
   </section>

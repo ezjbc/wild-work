@@ -1382,6 +1382,12 @@ function bind() {
   } catch (e) { /* 探针失败走下面的常规加载（如代理拦截） */ }  loadUsage(); // 页面加载即拉取（首次渲染自动刷新，不依赖手动点击）
   await loadState(); // 状态瞬间返回
   await loadFees();  // 费率表用缓存/静态兜底，秒开
+  // 运行统计：统计/请求日志 30s、运行日志 15s 常驻轮询
+  // （不依赖当前 tab——里程碑 toast 要在任何 tab 下及时弹出；tab 切入时另有即时拉取）
+  loadStats();
+  setInterval(loadStats, STATS_POLL_MS);
+  loadAppLog();
+  setInterval(loadAppLog, APPLOG_POLL_MS);
 })();
 
 // ---------- 用量与流水面板 ----------
@@ -1565,17 +1571,21 @@ function fmtDay(ts) {
   return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-// 主面板 tab 切换（账号管理 / 用量与流水）
+// 主面板 tab 切换（账号管理 / 用量与流水 / 运行统计）
 function bindMainTabs() {
   document.querySelectorAll(".main-tabs .mtab").forEach((b) => {
     b.onclick = () => {
       document.querySelectorAll(".main-tabs .mtab").forEach((x) => x.classList.toggle("active", x === b));
       $("mtabAccounts").classList.toggle("hidden", b.dataset.mtab !== "accounts");
       $("mtabUsage").classList.toggle("hidden", b.dataset.mtab !== "usage");
+      $("mtabStats").classList.toggle("hidden", b.dataset.mtab !== "stats");
       if (b.dataset.mtab === "usage") {
         loadUsage(); // 切到用量 tab 时拉最新（首次渲染自动刷新）
         if (usageChart) usageChart.resize();
         if (creditChart) creditChart.resize();
+      }
+      if (b.dataset.mtab === "stats") {
+        loadStats(); // 切到运行统计 tab 时拉最新（后台 30s 轮询兜底）
       }
     };
   });
@@ -1605,5 +1615,388 @@ function bindUsage() {
   $("pgPrev").onclick = () => { if (recentPage > 0) { recentPage--; renderRecentPage(lastNames); } };
   $("pgNext").onclick = () => { recentPage++; renderRecentPage(lastNames); };
   window.addEventListener("resize", () => { if (usageChart) usageChart.resize(); if (creditChart) creditChart.resize(); });
+}
+
+// ---------- 运行统计面板（第三个主 tab；数据来自 internal/stats 引擎的 /api/stats） ----------
+const STATS_POLL_MS = 30000;   // 统计/请求日志轮询周期
+const APPLOG_POLL_MS = 15000;  // 运行日志（app.log）轮询周期
+const APPLOG_MAX_LINES = 200;  // 渲染上限（上游 /api/logs 最多回 300 行，前端再多不渲染）
+const STATS_LOGS_URL = "/api/stats/logs?limit=15";
+const TOAST_SEEN_KEY = "stats-toast-seen"; // 里程碑 toast 已读去重（localStorage，防每轮轮询重复弹）
+
+// 小数积分（模型行）：整数走千分位，非整数保留两位
+function fmtCreditS(x) {
+  x = Number(x) || 0;
+  return Number.isInteger(x) ? fmtCredits(x) : x.toFixed(2);
+}
+// tok/s 一位小数（≥100 取整）；0 值由调用方给「—」不解为 0 速度
+function fmtPct(x) {
+  if (!x) return "";
+  return x >= 100 ? String(Math.round(x)) : x.toFixed(1);
+}
+// Trae 系渠道判定（TraeWork/TraeCode 共用账号积分池，上游 usage 帧不含单次积分 → 积分为分摊估算）
+function isTraeChannel(model) {
+  const s = String(model || "");
+  const i = s.indexOf("/");
+  return i > 0 && (s.slice(0, i) === "traework" || s.slice(0, i) === "traecode");
+}
+
+let statsRefreshing = false; // 防重入：上轮未完成时跳过本轮（防慢响应晚到覆盖新数据）
+let statsWarned = false;     // 拉取失败只 warn 一次，避免控制台刷屏
+let statsLastOk = "";        // 最近一次成功拉取时刻（失败角标要注明数据停止于何时）
+
+// 更新角标：成功 → 记录时刻；失败 → 标红注明数据停止时间（陈旧数据必须可感知）
+function stMarkUpdated() {
+  const el = $("stUpdated");
+  el.classList.remove("st-stale");
+  el.textContent = "上次更新 " + (statsLastOk = new Date().toTimeString().slice(0, 8));
+}
+function stMarkStale() {
+  const el = $("stUpdated");
+  el.classList.add("st-stale");
+  el.textContent = statsLastOk ? `拉取失败 · 数据停止于 ${statsLastOk}` : "拉取失败";
+}
+
+async function loadStats() {
+  if (statsRefreshing) return;
+  statsRefreshing = true;
+  try {
+    const [s, lg] = await Promise.all([
+      api("/api/stats"),
+      api(STATS_LOGS_URL).catch(() => null), // 失败保旧：跳过本轮渲染，不清空已渲染的请求日志
+    ]);
+    renderStats(s);
+    renderAbnormal(s.abnormal || []);
+    if (lg) renderLogs(lg.rows || []);
+    stMarkUpdated();
+  } catch (e) {
+    stMarkStale();
+    if (!statsWarned) { statsWarned = true; console.warn("运行统计加载失败：", e); }
+  } finally {
+    statsRefreshing = false;
+  }
+}
+
+async function loadAppLog() {
+  try {
+    const d = await api("/api/logs");
+    renderAppLog(d.lines || []);
+  } catch (e) { /* 上游瞬时不可达：保留旧内容，下轮重试 */ }
+}
+
+// 汇总横条条目（标签 + 等宽数值 + 可选小字注解）
+function stSumItem(label, val, cls, sub) {
+  return `<span class="st-sum-item"><span class="st-sum-label">${label}</span>` +
+    `<span class="st-sum-val ${cls || ""}">${val}</span>` +
+    (sub ? `<span class="st-sum-sub">${sub}</span>` : "") + `</span>`;
+}
+// Token 多天行条目
+function stTkItem(label, val) {
+  return `<span class="st-tk-item">${label} <span class="st-tk-val">${val}</span></span>`;
+}
+
+function renderStats(s) {
+  const tu = s.token_usage || {};
+  // 汇总横条：作废/今日到期仅 >0 时出现（避免每天多条 0 值噪音）
+  $("stSum").innerHTML =
+    stSumItem("总积分", fmtCredits(s.total_credits) + "分", "pur", fmtCredits(s.total_accounts) + " 个账号") +
+    stSumItem("收入积分", fmtCredits(s.credit_in), "ok", "签到事件口径") +
+    stSumItem("今日消耗", fmtCredits(s.credit_used), "warn", "精确 " + fmtCreditS(s.credit_out_exact)) +
+    (Number(s.credit_expired) > 0
+      ? stSumItem("今日作废", fmtCredits(s.credit_expired), "risk", "积分包到期 · 非消耗")
+      : "") +
+    stSumItem("消耗 Token", fmtTokensFull(s.tokens), "warn") +
+    (Number(s.expire_today) > 0
+      ? stSumItem("今日到期", fmtCredits(s.expire_today) + "分", "risk", "今晚作废尽快消耗")
+      : "");
+  $("stMilestone").textContent = s.milestone_count > 0 ? `里程碑 ${s.milestone_count}×100分` : "";
+  renderPlatformTable(s);
+  // Token 多天行（今日情况标题右侧）
+  $("stToken").innerHTML =
+    stTkItem("Token 今日", fmtTokensFull(tu.today)) +
+    stTkItem("7日", fmtTokensFull(tu.days7)) +
+    stTkItem("30日", fmtTokensFull(tu.days30)) +
+    stTkItem("请求 今日", fmtCredits(tu.req_today) + " / " + fmtCredits(tu.req_all)) +
+    stTkItem("已记录", fmtCredits(tu.days) + " 天");
+  renderRotation(s.rotation || []);
+  renderExpiry(s.expiry || []);
+  renderModels(s.models || []);
+  handleToasts(s.toasts || []);
+}
+
+// 平台表（今日情况主视图）：列 = #/平台/账号/当前积分/今日收入/今日消耗(净值)/今日Token/
+// 今日到期/明日到期/7日内到期，末行合计。「今日消耗」= 差值花费 − 积分包到期作废（净值才是真消耗）。
+// 合计行取全池口径，与顶部汇总横条严格同源（合计 == 横条可互相印证）。
+function renderPlatformTable(s) {
+  const rows = s.platforms || [];
+  if (!rows.length) { $("stPlat").innerHTML = ""; return; }
+  let html = `<div class="st-plat-row st-plat-head">` +
+    `<span class="st-plat-no">#</span>` +
+    `<span class="st-plat-slot">平台</span>` +
+    `<span class="st-plat-accts">账号</span>` +
+    `<span class="st-plat-credits">当前积分</span>` +
+    `<span class="st-plat-in">今日收入</span>` +
+    `<span class="st-plat-out" title="花费差值扣除积分包到期作废后的净消耗">今日消耗</span>` +
+    `<span class="st-plat-tokens">今日消耗Token</span>` +
+    `<span class="st-plat-exp">今日到期</span>` +
+    `<span class="st-plat-exp">明日到期</span>` +
+    `<span class="st-plat-exp">7日内到期</span>` +
+    `</div>`;
+  rows.forEach((r, i) => {
+    html += `<div class="st-plat-row">` +
+      `<span class="st-plat-no">${i + 1}</span>` +
+      `<span class="st-plat-slot"><span class="badge ${chClass(r.group)}">${esc(chLabel(r.group))}</span></span>` +
+      `<span class="st-plat-accts">${fmtCredits(r.accounts)}</span>` +
+      stPlatNum("st-plat-credits", r.credits, "分") +
+      stPlatNum("st-plat-in", r.credit_in) +
+      stPlatNum("st-plat-out", r.credit_used) +
+      stPlatTok(r.tokens) +
+      stPlatNum("st-plat-exp", r.expire_today, "分") +
+      stPlatNum("st-plat-exp", r.expire_tomorrow, "分") +
+      stPlatNum("st-plat-exp", r.expire_7d, "分") +
+      `</div>`;
+  });
+  // 合计行：与顶部汇总横条同源
+  html += `<div class="st-plat-row st-plat-sum-row">` +
+    `<span class="st-plat-no"></span>` +
+    `<span class="st-plat-slot">合计</span>` +
+    `<span class="st-plat-accts">${fmtCredits(s.total_accounts)}</span>` +
+    stPlatNum("st-plat-credits", s.total_credits, "分") +
+    stPlatNum("st-plat-in", s.credit_in) +
+    stPlatNum("st-plat-out", s.credit_used) +
+    stPlatTok(s.tokens) +
+    stPlatNum("st-plat-exp", s.expire_today, "分") +
+    stPlatNum("st-plat-exp", s.expire_tomorrow, "分") +
+    stPlatNum("st-plat-exp", s.expiring_7d, "分") +
+    `</div>`;
+  $("stPlat").innerHTML = html;
+}
+
+// 平台表数值单元格：0 值置灰「—」（避免满屏 0 淹没真正有数的列），颜色由列类自带
+function stPlatNum(cls, amount, suffix) {
+  amount = Number(amount) || 0;
+  if (amount <= 0) return `<span class="${cls} st-plat-zero">—</span>`;
+  return `<span class="${cls}">${fmtCredits(amount)}${suffix || ""}</span>`;
+}
+// Token 单元格：单位走 万/亿，0 同样置灰
+function stPlatTok(amount) {
+  amount = Number(amount) || 0;
+  if (amount <= 0) return `<span class="st-plat-tokens st-plat-zero">—</span>`;
+  return `<span class="st-plat-tokens">${fmtTokensFull(amount)}</span>`;
+}
+
+const ST_ROT_MARKS = ["①", "②", "③"];
+
+// 使用中 / 接棒顺序：当前=粘性账号；接棒=临期优先+余额排序推算的前 3
+function renderRotation(rot) {
+  if (!rot.length) { $("stRotation").innerHTML = ""; $("stRotation").className = "st-rotation"; return; }
+  let html = `<div class="st-block-title">使用中 / 接棒顺序<span class="st-hint">当前=粘性账号 · 接棒=临期优先+余额排序推算</span></div>`;
+  for (const rv of rot) {
+    const cur = rv.current
+      ? `使用中 <b>${esc(rv.current.nickname)}</b>（粘性 ${esc(rv.current.sticky || "0")}，余额 ${fmtCredits(rv.current.credits)}分）`
+      : `<span class="st-rot-none">暂无使用记录</span>`;
+    let nextHtml = "";
+    (rv.next || []).forEach((n, j) => {
+      nextHtml += `<span class="st-rot-next">${ST_ROT_MARKS[j]} ${esc(n.nickname)}` +
+        `（${fmtCredits(n.credits)}分${n.expiring > 0 ? "·临期" + fmtCredits(n.expiring) : ""}）</span>`;
+    });
+    html += `<div class="st-rot-row"><span class="badge ${chClass(rv.group)}">${esc(chLabel(rv.group))}</span>` +
+      `<span class="st-rot-cur">${cur}</span>` +
+      (nextHtml ? `<span class="st-rot-nexts">${nextHtml}</span>` : "") + `</div>`;
+  }
+  $("stRotation").innerHTML = html;
+  $("stRotation").className = "st-rotation st-block";
+}
+
+// 最近临期：到期日升序；risk=按今日速度花不完 → 给预计作废量（额度−外推消耗）
+function renderExpiry(ex) {
+  if (!ex.length) { $("stExpiry").innerHTML = ""; $("stExpiry").className = "st-expiry"; return; }
+  let html = `<div class="st-block-title">最近临期<span class="st-hint">按到期日升序 · ${ex.length} 个账号</span></div>` +
+    `<div class="st-scroll st-ex-scroll">` +
+    `<div class="st-ex-row st-ex-head">` +
+    `<span class="st-ex-tag">#</span>` +
+    `<span class="st-ex-plat-slot">平台</span>` +
+    `<span class="st-ex-name">账号</span>` +
+    `<span class="st-ex-date">到期日</span>` +
+    `<span class="st-ex-days">剩余</span>` +
+    `<span class="st-ex-amt">额度 · 今日已耗</span>` +
+    `</div>`;
+  ex.forEach((r, i) => {
+    const dayTxt = r.days_left <= 0 ? "今日到期" : (r.days_left === 1 ? "明日到期" : `${r.days_left} 天后到期`);
+    const burn = r.risk ? ` · 预计作废 ${fmtCredits(r.amount - r.burn_forecast)}分` : "";
+    html += `<div class="st-ex-row${r.risk ? " st-risk" : ""}">` +
+      `<span class="st-ex-tag">${i + 1}</span>` +
+      `<span class="st-ex-plat-slot"><span class="badge ${chClass(r.group)}">${esc(chLabel(r.group))}</span></span>` +
+      `<span class="st-ex-name" title="${esc(r.uid)}">${esc(r.nickname || r.uid)}</span>` +
+      `<span class="st-ex-date">${esc(r.expire_at)}</span>` +
+      `<span class="st-ex-days">${esc(dayTxt)}</span>` +
+      `<span class="st-ex-amt">${fmtCredits(r.amount)}分 · 已耗 ${fmtCredits(r.today_out)}${burn}</span>` +
+      `</div>`;
+  });
+  html += `</div>`;
+  $("stExpiry").innerHTML = html;
+  $("stExpiry").className = "st-expiry st-block";
+}
+
+// 模型消耗（今日，按积分降序）：Trae 系积分加「≈」（分摊估算），平均速度=成功请求实测均值
+function renderModels(models) {
+  let mh = `<tr><th>#</th><th>模型</th><th>次数</th><th>Token</th><th>积分</th>` +
+    `<th title="成功请求实测均值：tok/s = 生成 token ÷ 生成耗时（按时长加权）；TTFB = 首字节耗时算术平均">平均速度</th></tr>`;
+  models.forEach((m, j) => {
+    const isTrae = isTraeChannel(m.model);
+    let creditCell;
+    if (m.credit > 0) {
+      creditCell = isTrae
+        ? `<span title="TraeWork 上游不下发单次积分：按该渠道今日真实消耗（余额差值）与 token 占比分摊，为估算值">≈${fmtCreditS(m.credit)}</span>`
+        : fmtCreditS(m.credit);
+    } else {
+      creditCell = isTrae
+        ? `<span title="TraeWork 无单次精确积分，按渠道真实消耗分摊；暂无余额差值消耗">—</span>`
+        : fmtCreditS(m.credit);
+    }
+    const tps = Number(m.avg_tok_per_sec) || 0;
+    const ttfb = Number(m.avg_ttfb_ms) || 0;
+    const parts = [];
+    if (tps > 0) parts.push(fmtPct(tps) + " tok/s");
+    if (ttfb > 0) parts.push(fmtCredits(ttfb) + "ms");
+    const perfCell = parts.length
+      ? `<span title="样本 ${fmtCredits(m.perf_samples)} 次成功请求">${parts.join(" · ")}</span>`
+      : "—";
+    mh += `<tr><td class="st-idx">${j + 1}</td>` +
+      `<td class="st-mono" title="${esc(m.model)}">${esc(m.model)}</td>` +
+      `<td>${fmtCredits(m.reqs)}</td><td>${fmtTokensFull(m.tokens)}</td><td>${creditCell}</td>` +
+      `<td class="st-mono">${perfCell}</td></tr>`;
+  });
+  $("stModels").innerHTML = models.length ? mh : `<tr><td class="st-empty" colspan="6">今日暂无消耗</td></tr>`;
+}
+
+// 请求日志：降序渲染（最新在最上）；tok/s 仅流式有值，0/空给「—」
+function renderLogs(rows) {
+  let h = `<tr><th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th><th>TTFB</th><th>tok</th><th>tok/s</th><th>total</th><th>积分</th></tr>`;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    const status = r.status < 400 ? String(r.status) : `<span class="st-bad">${r.status}</span>`;
+    const tps = r.tok_per_sec > 0 ? fmtPct(r.tok_per_sec) : "—";
+    h += `<tr><td>${fmtCredits(r.seq)}</td><td class="st-mono">${esc(r.time)}</td><td class="st-mono">${esc(r.model)}</td>` +
+      `<td>${esc(r.mode)}</td><td>${status}</td><td>${fmtCredits(r.ttfb_ms)}ms</td><td>${fmtCredits(r.tok)}</td><td>${tps}</td>` +
+      `<td>${r.total_sec ? r.total_sec.toFixed(1) + "s" : "—"}</td><td>${r.credit > 0 ? fmtCreditS(r.credit) : "—"}</td></tr>`;
+  }
+  $("stLogs").innerHTML = rows.length ? h : `<tr><td class="st-empty">暂无请求</td></tr>`;
+}
+
+// 异常账号（三级：disabled 已停用 / cool 整号冷却 / err 错误累计；无异常整块隐藏）
+const ABNORMAL_META = {
+  disabled: { cls: "st-ab-disabled", tag: "已停用", tip: "账号被上游停用（如登录态失效），需人工处理" },
+  cool: { cls: "st-ab-cool", tag: "整号冷却", tip: "账号整体进入冷却（限流/余额不足/账号故障），解冻前不可用" },
+  err: { cls: "st-ab-err", tag: "错误累计", tip: "连续错误累计中，达阈值将触发冷却" },
+};
+
+function renderAbnormal(rows) {
+  if (!rows.length) { $("stAbnormal").innerHTML = ""; $("stAbnormal").className = "st-abnormal"; return; }
+  const counts = { disabled: 0, cool: 0, err: 0 };
+  rows.forEach((r) => { if (counts[r.level] != null) counts[r.level]++; });
+  // 摘要徽章只显示存在的级别（顺序固定：停用→整号冷却→错误累计）
+  let sumHtml = "";
+  ["disabled", "cool", "err"].forEach((lv) => {
+    if (counts[lv] > 0) {
+      sumHtml += `<span class="st-ab-sum ${ABNORMAL_META[lv].cls}" title="${esc(ABNORMAL_META[lv].tip)}">` +
+        `${ABNORMAL_META[lv].tag} ${counts[lv]}</span>`;
+    }
+  });
+  let html = `<div class="st-block-title">异常账号<span class="st-hint">限流 / 冻结 / 亚健康 · 共 ${rows.length} 个</span>` +
+    `<span class="st-ab-sums">${sumHtml}</span></div>` +
+    `<div class="st-scroll st-ab-scroll">` +
+    `<div class="st-ab-row st-ab-head">` +
+    `<span class="st-ab-idx">#</span>` +
+    `<span class="st-ab-tag-slot">状态</span>` +
+    `<span class="st-ab-plat-slot">平台</span>` +
+    `<span class="st-ab-name">账号</span>` +
+    `<span class="st-ab-reason">原因</span>` +
+    `<span class="st-ab-until">解冻</span>` +
+    `<span class="st-ab-credit">余额</span>` +
+    `</div>`;
+  rows.forEach((r, i) => {
+    const meta = ABNORMAL_META[r.level] || ABNORMAL_META.err;
+    let reason = r.reason || meta.tag;
+    if (r.level === "err" && r.err_count) reason = `连续错误 ${fmtCredits(r.err_count)} 次`;
+    html += `<div class="st-ab-row ${meta.cls}">` +
+      `<span class="st-ab-idx">${i + 1}</span>` +
+      `<span class="st-ab-tag-slot"><span class="st-ab-tag" title="${esc(meta.tip)}">${meta.tag}</span></span>` +
+      `<span class="st-ab-plat-slot"><span class="badge ${chClass(r.group)}">${esc(chLabel(r.group))}</span></span>` +
+      `<span class="st-ab-name" title="${esc(r.uid)}">${esc(r.nickname || r.uid)}</span>` +
+      `<span class="st-ab-reason" title="${esc(reason)}">${esc(reason)}</span>` +
+      `<span class="st-ab-until">${r.until ? esc(r.until) : "—"}</span>` +
+      `<span class="st-ab-credit">${r.credits > 0 ? fmtCredits(r.credits) + "分" : "—"}</span>` +
+      `</div>`;
+  });
+  html += `</div>`;
+  $("stAbnormal").innerHTML = html;
+  $("stAbnormal").className = "st-abnormal st-block";
+}
+
+// 运行日志（app.log 尾部）：级别判定顺序有讲究——
+// ① code=9074/ok=false 先标红（「签到完成」话术里装的业务失败，先判会被误放行为 info）；
+// ② 已签到 是良性重复签到，不标红；③ 汇总成功行（含 failed=N）仍按成功放行。
+function appLogLevel(text) {
+  if (/code=9074|ok=false/.test(text)) return "err";
+  if (/完成|成功|ok=true|已签到/.test(text)) return "info";
+  if (/PANIC|FATAL|失败|错误|无效|Error|failed/.test(text)) return "err";
+  if (/warn|WARN|警告/.test(text)) return "warn";
+  return "info";
+}
+
+let applogFirst = true;
+function renderAppLog(lines) {
+  // 用户上翻阅读时不打扰；贴底（或首帧）才自动吸底
+  const box = $("stApplog");
+  const pinned = applogFirst || box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+  applogFirst = false;
+  let html = "";
+  const start = Math.max(0, lines.length - APPLOG_MAX_LINES);
+  for (let i = start; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    // Go log 前缀 "2026/09/22 15:04:05.123456 " → 展示 MM-DD HH:MM:SS
+    const m = line.match(/^(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\s(.*)$/);
+    const cls = `st-logline st-log-${appLogLevel(line)}`;
+    if (m) {
+      html += `<div class="${cls}"><span class="st-log-time">${esc(m[1].slice(5, 19))}</span>${esc(m[2])}</div>`;
+    } else {
+      html += `<div class="${cls}">${esc(line)}</div>`;
+    }
+  }
+  box.innerHTML = html || `<div class="st-empty">暂无日志</div>`;
+  if (pinned) box.scrollTop = box.scrollHeight;
+}
+
+// 里程碑 toast：浏览器通知优先，降级面板 toast（复用上游 #toast）；localStorage 按 id 去重
+function statsToastSeen() {
+  try { return JSON.parse(localStorage.getItem(TOAST_SEEN_KEY) || "[]"); } catch (e) { return []; }
+}
+function statsToastMark(id) {
+  const ids = statsToastSeen();
+  ids.push(id);
+  try { localStorage.setItem(TOAST_SEEN_KEY, JSON.stringify(ids.slice(-200))); } catch (e) { /* 忽略 */ }
+}
+function handleToasts(list) {
+  let seen = {};
+  try { statsToastSeen().forEach((x) => { seen[x] = 1; }); } catch (e) { seen = {}; }
+  for (const t of list) {
+    if (seen[t.id]) continue;
+    showStatsNotification(t.title, t.body);
+    statsToastMark(t.id);
+  }
+}
+function showStatsNotification(title, body) {
+  try {
+    if ("Notification" in window) {
+      if (Notification.permission === "granted") {
+        new Notification(title, { body });
+        return;
+      }
+      if (Notification.permission === "default") Notification.requestPermission();
+    }
+  } catch (e) { /* 降级面板提示 */ }
+  toast(`${title}：${body}`);
 }
 
