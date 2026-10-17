@@ -32,6 +32,9 @@ func TestClassify(t *testing.T) {
 		// 尾形（code 后紧跟 }，无 msg）是真 14018，须命中。
 		{429, `{"error":{"data":{"code":140180,"msg":"future code"}}}`, ErrSoftRate},
 		{429, `{"error":{"data":{"code":14018}}}`, ErrHardCredit},
+		// 美化 JSON / 字符串码同样须命中（CodeMarker 统一口径，旧字面量匹配会漏判）：
+		{429, `{"error": {"data": {"code": 14018, "msg": "Credits exhausted"}}}`, ErrHardCredit},
+		{429, `{"error":{"data":{"code":"14018"}}}`, ErrHardCredit},
 		// 回归：6004 模型级限流 / 14003 过频（构造，未实证）/ 429+quota exceeded 均保持软限流。
 		{429, `{"code":6004,"msg":"usage exceeds frequency limit ... will reset at ..."}`, ErrSoftRate},
 		{429, `{"code":14003,"msg":"too many requests"}`, ErrSoftRate},

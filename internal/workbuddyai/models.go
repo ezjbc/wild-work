@@ -483,12 +483,11 @@ func Classify(status int, body string) provider.ErrKind {
 		// 无重置时间戳，回退 SoftCooldown），到期容量"恢复"，降级链永不触发，客户端
 		// 死循环吃 429（2026-09-23 起生产实录）。归 ErrHardCredit：账号级 12h 硬冷却
 		// （充值后 ReenableIfCredits 自动解冻），下一请求入口降级链正常顶替。
-		// 匹配防前缀误伤："code":140180 含子串 "code":14018——命中后下一字符须非
-		// 数字，防未来 14xxxx 新码误归 12h 账号硬冷却。
-		if idx := strings.Index(body, `"code":14018`); idx >= 0 {
-			if end := idx + len(`"code":14018`); end >= len(body) || body[end] < '0' || body[end] > '9' {
-				return provider.ErrHardCredit
-			}
+		// 判定复用 provider.CodeMarker（统一口径）：同时认紧凑/美化 JSON
+		// （`"code": 14018`）与字符串码（`"code":"14018"`），且码后紧跟字母/数字
+		// 不算命中（`"code":140180` 保持软限流）。
+		if provider.CodeMarker(lower, "14018") {
+			return provider.ErrHardCredit
 		}
 		if strings.Contains(lower, "credits exhausted") {
 			return provider.ErrHardCredit

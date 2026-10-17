@@ -179,6 +179,9 @@ func TestClassify(t *testing.T) {
 		// 尾形（code 后紧跟 }，无 msg）是真 14018，须命中。
 		{429, `{"error":{"data":{"code":140180,"msg":"future code"}}}`, "soft_rate"},
 		{429, `{"error":{"data":{"code":14018}}}`, "hard_credit"},
+		// 美化 JSON / 字符串码同样须命中（CodeMarker 统一口径，旧字面量匹配会漏判）：
+		{429, `{"error": {"data": {"code": 14018, "msg": "Credits exhausted"}}}`, "hard_credit"},
+		{429, `{"error":{"data":{"code":"14018"}}}`, "hard_credit"},
 		// 14003 过频（构造 body，未实证）：保持软限流，不回归。
 		{429, `{"code":14003,"msg":"too many requests"}`, "soft_rate"},
 		// 429 + quota exceeded（非 14018）：429 优先于 hardRule 的既有语义保持——
