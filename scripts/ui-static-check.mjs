@@ -55,6 +55,8 @@ function mkNode(id) {
     id,
     innerHTML: "",
     textContent: "",
+    // 表单控件桩：updateEffDirty 等会读 value.trim()，缺失会抛 TypeError 直接打断整个检查
+    value: "",
     style: {},
     classList: {
       add: (c) => cls.add(c),
@@ -106,7 +108,7 @@ const patched =
       { model: "cline-free/mimo-v2.6-flash", id: "cline-free/mimo-v2.6-flash", priced: true, rate: 0, free: true, has_context: true, context_window: 1000000 },
     ] },
   ] }) + ";"
-  + "\n; globalThis.__T = { renderAccounts, renderSummary, loadStats, renderStats, renderPlatformTable, renderRotation, renderExpiry, renderModels, renderLogs, renderAbnormal, renderFallbacks, renderEffList, renderAppLog, handleToasts, renderModelSearch, collectAllModels, cacheCell, renderUsageCacheCard, renderModelTable, renderUsage, renderFees };";
+  + "\n; globalThis.__T = { renderAccounts, renderSummary, loadStats, renderStats, renderPlatformTable, renderRotation, renderExpiry, renderModels, renderLogs, renderAbnormal, renderFallbacks, renderEffList, renderAppLog, handleToasts, renderModelSearch, collectAllModels, cacheCell, renderUsageCacheCard, renderModelTable, renderUsage, renderFees, setEffRules: (r) => { effRules = r; } };";
 
 new Function("document", "window", "localStorage", "fetch", "location", "navigator", patched)(
   document,
@@ -370,7 +372,9 @@ const uniq = [
   ["const CH_ORDER", /^\s*const CH_ORDER\s*=/gm],
   ["const CH_SUMMARY_ORDER", /^\s*const CH_SUMMARY_ORDER\s*=/gm],
   ["function renderAccounts", /^\s*function renderAccounts\s*\(/gm],
-  ["function render()", /^\s*function render\s*\(/gm],
+  // 只看行首（顶格）定义：组合框等组件内部的同名局部函数（attachModelPicker /
+  // attachEffortPicker 里的 function render()）不是重复定义，不应误报。
+  ["function render()", /^function render\s*\(/gm],
   // 运行统计区块（防「同一提交里写两版」的非预期重复，同 renderSummary 教训）
   ["function loadStats", /^\s*async function loadStats\s*\(/gm],
   ["function renderStats", /^\s*function renderStats\s*\(/gm],
@@ -535,9 +539,11 @@ for (const [label, re] of uniq) {
   const need = [
     ["设置弹层有思考强度编辑区（全局默认行 + 映射列表 + 输入行）",
       html.includes('id="effGlobalInput"') && html.includes('id="effList"') && html.includes('id="effModelInput"') && html.includes('id="effEffortInput"') && html.includes('id="btnEffAdd"') && html.includes('id="btnEffSave"')],
-    ["档位建议集 datalist = none/low/medium/high/max（哑管道：输入框仍可自由输入）",
-      /<datalist id="effortDatalist">[\s\S]*?value="none"[\s\S]*?value="low"[\s\S]*?value="medium"[\s\S]*?value="high"[\s\S]*?value="max"/.test(html)
-      && html.includes('list="effortDatalist"')],
+    ["档位建议集 = none/low/medium/high/xhigh/max（哑管道：输入框仍可自由输入）",
+      /const PK_EFFORTS = \["none", "low", "medium", "high", "xhigh", "max"\]/.test(raw)
+      && raw.includes("attachEffortPicker($(\"effEffortInput\")")],
+    ["档位下拉标注「可自由输入」（候选只是建议，不校验）",
+      raw.includes("无匹配档位（可自由输入）")],
     ["hint 含三态语义（未带才注入 / 显式传不覆盖 / 回退全局默认）",
       html.includes("客户端请求<b>未带</b>") && html.includes("一律不覆盖") && html.includes("精确未命中回退全局默认")],
     ["hint 含 channel/model 格式与 TraeWork 无效说明",
@@ -549,9 +555,15 @@ for (const [label, re] of uniq) {
     ["重复模型拒绝（每个模型只允许一条）", raw.includes("已有档位（每个模型只允许一条）")],
     ["模型行拒绝 `*`（全局默认专用键另有入口）", raw.includes("* 是全局默认专用键")],
     ["renderEffList 空态占位常显（未配置 = 不注入，不整块隐藏）",
-      (T.renderEffList(), nodes["effList"].innerHTML.includes("暂无模型档位"))],
-    ["renderEffList 模型 ID 列显式 width:auto（.lbl.wide 的 90px 定宽会压掉 max-width）",
-      /class="lbl wide" style="width:auto;max-width:340px/.test(raw)],
+      (T.setEffRules([]), T.renderEffList(), nodes["effList"].innerHTML.includes("暂无模型档位"))],
+    ["renderEffList 用卡片渲染（映射徽标 + 模型ID + 档位，与降级链卡片同款）",
+      (T.setEffRules([{ model: "workbuddyai/deepseek-v4.1-flash", effort: "high" }]), T.renderEffList(),
+        nodes["effList"].innerHTML.includes("fb-map-card")
+        && nodes["effList"].innerHTML.includes("fb-map-model")
+        && nodes["effList"].innerHTML.includes("fb-map-eff"))],
+    ["超长模型 ID 省略显示（.fb-map-model 有 ellipsis，不撑破卡片）",
+      /\.fb-map-card \.fb-map-model \{[^}]*text-overflow:\s*ellipsis/.test(
+        readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8"))],
   ];
   for (const [label, pass] of need) {
     console.log(`  ${pass ? "✅" : "❌"} ${label}`);

@@ -306,8 +306,10 @@ function attachModelPicker(input, opts) {
       else { pkClose(); if (opts.enterAction) opts.enterAction(e); }
     }
   });
-  // 失焦即关（菜单项 mousedown 已 preventDefault，点菜单项不会先触发 blur）
-  input.addEventListener("blur", () => setTimeout(pkClose, 120));
+  // 失焦即关（菜单项 mousedown 已 preventDefault，点菜单项不会先触发 blur）。
+  // 输入框已被重建（行内多选追加后 renderFbList 重渲染）时不再关菜单：那是旧实例的
+  // 失焦，关闭会把新实例刚打开的下拉一起关掉，连续点选变成只能选一次。
+  input.addEventListener("blur", () => setTimeout(() => { if (input.isConnected) pkClose(); }, 120));
   menu.addEventListener("mousedown", (e) => e.preventDefault());
   menu.addEventListener("click", (e) => {
     const it = e.target.closest(".pk-item");
@@ -1618,22 +1620,28 @@ async function toggleAutostart() {
 // fbRules 编辑态副本（openSettings 时从 state.model_fallback 深拷贝；保存成功后由 loadState 刷新）
 let fbRules = [];
 
-// fbFromSet 汇总当前全部主力模型ID（跨规则）：备胎候选/追加/清洗统一从这里排除——
-// 同一 ID 不允许既是某规则主力又出现在任何备胎链。每次下拉 render 实时取，主力列表变更即同步可选范围。
+// fbFromSet 汇总当前全部主力模型ID（跨规则）：仅用于「主力模型ID 全局唯一」的输入候选过滤
+// （新规则的主力框排除已配置主力）。**不得**用于备胎候选/追加/清洗——后端 pickModelFallback
+// 支持链式降级（A→B、B→C 并存），把「主力ID」当备胎互斥集会删掉合法边。
 function fbFromSet() {
   const s = {};
   for (const r of fbRules) if (r.from) s[r.from] = true;
   return s;
 }
-// fbSanitize 就地清洗 fbRules：从每条备胎链剔除任意规则的主力ID（含历史脏数据），返回剔除条数。
-// renderFbList 每轮渲染前先过一遍（所有编辑路径都经 renderFbList 重渲染，chip 索引始终与清洗后
-// 数组一致），保存前再兜底一次——渲染/比对/落盘共用同一份互斥干净数据。
+// fbSanitize 就地清洗 fbRules：只剔除自环（备胎 == 本规则主力）与同链内重复项，
+// 返回剔除条数。链式降级（B 既是 A 的备胎、又是 C 的主模型）是合法配置，不在此清洗。
+// renderFbList 每轮渲染前先过一遍（所有编辑路径都经 renderFbList 重渲染，chip 索引始终与
+// 清洗后数组一致），保存前再兜底一次——渲染/比对/落盘共用同一份干净数据。
 function fbSanitize() {
-  const fs = fbFromSet();
   let dropped = 0;
   for (const r of fbRules) {
-    const keep = r.to.filter((t) => !fs[t]);
-    dropped += r.to.length - keep.length;
+    const seen = {};
+    const keep = [];
+    for (const t of r.to) {
+      if (t === r.from || seen[t]) { dropped++; continue; }
+      seen[t] = true;
+      keep.push(t);
+    }
     r.to = keep;
   }
   return dropped;
@@ -1666,8 +1674,8 @@ function updateEffDirty() {
 // 交互全部事件委托在 #fbList 上（data-del-rule / data-del-to / data-add-to / data-edit-idx /
 // dragstart / dragover / drop / dragend），每轮 innerHTML 重建后委托仍然有效。
 function renderFbList() {
-  const dropped = fbSanitize(); // 互斥校验：主力ID不出现在任何备胎链（chip 索引与数据一致）
-  if (dropped > 0) toast(`已自动剔除 ${dropped} 个与主力模型互斥的备胎`); // 唯一剔除时机：打开面板首轮（历史脏数据）/ 改主力波及他链
+  const dropped = fbSanitize(); // 清洗自环/链内重复（chip 索引与数据一致）
+  if (dropped > 0) toast(`已自动剔除 ${dropped} 个自环或重复的备胎`); // 唯一剔除时机：打开面板首轮（历史脏数据）/ 改主力产生自环
   const rows = fbRules.map((r, i) => {
     const tos = r.to.map((t, j) =>
       `<span class="fb-to-chip" draggable="true" data-chip="${i}:${j}" data-model="${esc(t)}" title="${esc(t)}（拖动调整顺序，序号 = 降级优先级）">`
@@ -1720,13 +1728,22 @@ function attachFbPickers() {
     const i = +inp.dataset.addIdx;
     attachModelPicker(inp, {
       stayOpen: true,
-      excludeSet: () => { const s = { ...fbFromSet() }; for (const t of (fbRules[i] && fbRules[i].to) || []) s[t] = true; return s; },
+      excludeSet: () => {
+        // 只排除本规则主力（自环）与本链已有项；其他规则的主力可以是本链备胎（链式降级）
+        const s = {};
+        const r = fbRules[i];
+        if (r) { s[r.from] = true; for (const t of r.to) s[t] = true; }
+        return s;
+      },
       onPick: (id) => {
         const r = fbRules[i];
         if (!r) return;
-        if (fbFromSet()[id] || r.to.includes(id)) return; // 主力ID或已上链 → 不追加（候选已隐藏，双保险）
+        if (id === r.from || r.to.includes(id)) return; // 自环或已上链 → 不追加（候选已隐藏，双保险）
         r.to.push(id);
-        renderFbList();
+        renderFbList(); // 整块重渲染：原输入框已脱离文档，pick 内 isConnected 判定会提前返回
+        // 把焦点交还给重建后的同一行输入框，恢复「连续点选多个」体验（focus 即重新拉候选）
+        const next = document.querySelector(`.fb-to-add[data-add-idx="${i}"]`);
+        if (next) next.focus();
         toast(`已加入备胎链第 ${r.to.length} 位（点保存生效）`);
       },
     });
@@ -2399,14 +2416,15 @@ function bind() {
     const [tos, err] = parseModelList($("fbToInput").value);
     if (err) { $("fbErr").textContent = err; return; }
     if (tos.length === 0) { $("fbErr").textContent = "至少填一个备胎模型ID"; return; }
-    // 互斥预过滤：剔除已有规则主力 + 新 from 自身（renderFbList 兜底同规则，此处前置给即时反馈）
-    const fsx = fbFromSet(); fsx[from] = true;
-    const kept = tos.filter((t) => !fsx[t]);
-    if (kept.length === 0) { $("fbErr").textContent = "备胎均与主力模型互斥（含新主力自身），请更换备胎"; return; }
-    if (kept.length < tos.length) toast(`已剔除 ${tos.length - kept.length} 个与主力模型互斥的备胎`);
+    // 预过滤：只剔除自环（备胎 == 新主力）与本次输入内的重复项。其他规则的主力可以是
+    // 本链备胎——后端 pickModelFallback 支持链式降级（A→B、B→C），不按「主力ID全局互斥」删边。
+    const kept = [];
+    for (const t of tos) if (t !== from && !kept.includes(t)) kept.push(t);
+    if (kept.length === 0) { $("fbErr").textContent = "备胎不能是主力模型自己，请更换备胎"; return; }
+    if (kept.length < tos.length) toast(`已剔除 ${tos.length - kept.length} 个自环或重复的备胎`);
     fbRules.push({ from, to: kept });
     $("fbFromInput").value = ""; $("fbToInput").value = "";
-    renderFbList(); // 内部先 fbSanitize：互斥兜底（预过滤后此处不再剔除）
+    renderFbList(); // 内部先 fbSanitize：自环/重复兜底（预过滤后此处不再剔除）
   };
   $("btnFbSave").onclick = saveModelFallback;
   $("fbList").addEventListener("click", async (e) => {
@@ -2417,7 +2435,8 @@ function bind() {
       const [tos, err] = parseModelList(inp && inp.value);
       if (err) { $("fbErr").textContent = err; return; }
       if (tos.length === 0) { $("fbErr").textContent = "先在输入框填备胎模型ID 再点 ＋"; return; }
-      fbRules[i].to.push(...tos.filter((t) => !fbFromSet()[t] && !fbRules[i].to.includes(t))); // 主力ID全局排除
+      // 只挡自环与本链重复；其他规则的主力可作本链备胎（链式降级合法）
+      fbRules[i].to.push(...tos.filter((t) => t !== fbRules[i].from && !fbRules[i].to.includes(t)));
       renderFbList();
       return;
     }
@@ -2444,7 +2463,8 @@ function bind() {
     const [tos, err] = parseModelList(e.target.value);
     if (err) { $("fbErr").textContent = err; return; }
     if (tos.length === 0) return;
-    fbRules[i].to.push(...tos.filter((t) => !fbFromSet()[t] && !fbRules[i].to.includes(t))); // 主力ID全局排除
+    // 只挡自环与本链重复；其他规则的主力可作本链备胎（链式降级合法）
+    fbRules[i].to.push(...tos.filter((t) => t !== fbRules[i].from && !fbRules[i].to.includes(t)));
     renderFbList();
   });
   // 行内主模型 ID 编辑：change（失焦/回车后 blur）提交——形态校验 + 主模型唯一性校验，
@@ -2534,12 +2554,13 @@ function bind() {
   // 配置区模糊搜索下拉接线（静态输入框一次性挂；行内输入框由 attachFbPickers 每轮重挂）。
   // 回车链：底部主力框 → 跳备胎框；备胎框 → 添加规则；映射模型框 → 跳档位框；档位框 → 添加映射。
   attachModelPicker($("fbFromInput"), {
-    excludeSet: () => fbFromSet(), // 已配置的主力从候选隐藏（重复由下方添加校验兜底），与备胎框行为对齐
+    excludeSet: () => fbFromSet(), // 已配置的主力从候选隐藏（主模型ID全局唯一，重复由下方添加校验兜底）
     enterAction: () => $("fbToInput").focus(),
   });
   attachModelPicker($("fbToInput"), {
     stayOpen: true, multiAccum: true, // 累积多选：点选逐个逗号追加，末段继续搜
-    excludeSet: () => fbFromSet(), // 已配置的主力模型ID从备胎候选隐藏（实时取，主力变更即同步）
+    // 只排除正在填的主力（防自环）；其他规则的主力可作备胎——链式降级 A→B、B→C 合法
+    excludeSet: () => { const s = {}; const f = $("fbFromInput").value.trim(); if (f) s[f] = true; return s; },
     enterAction: () => $("btnFbAdd").onclick(),
   });
   attachModelPicker($("effModelInput"), { enterAction: () => $("effEffortInput").focus() });
