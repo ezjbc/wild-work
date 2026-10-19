@@ -1083,6 +1083,13 @@ func (a *App) pollLogin(ctx context.Context) {
 		}
 		done, unfinished, perr := flow.Poll(a.loginClient, a.loginStateFP)
 		if perr == nil {
+			if unfinished {
+				// 授权尚未完成（wrapPoll / 表内 inline Poll 的 pending 形态：
+				// done=nil, unfinished=true, perr=nil）。此时直接调用 done 会因
+				// nil 函数值 panic，登录流程在首个 tick（2s）静默死亡，defer 复位
+				// login_busy 后面板还会误报「登录完成」。等下一个 tick 即可。
+				continue
+			}
 			if err := done(a); err != nil {
 				a.setLoginError("登录失败：" + err.Error())
 			}
