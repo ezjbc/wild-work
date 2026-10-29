@@ -8,7 +8,7 @@ package comate
 // /userinfo 等候选确实全是 404，当初据此下了 NA 结论）。2026-10-29 实测找到：
 //
 //  1. GET /llmproxy/v1/user/token-usage（Cookie: wps_sid）→ code:0
-//     data.credits.daily_limit {limit, remain, used}      每日额度（企业号 2000 / 已用 217 / 剩 1783）
+//     data.credits.daily_limit {limit, remain, used}      每日额度（企业号 1000 / 已用 217 / 剩 1783）
 //     data.credits_usage.periods[] {credits_limit, credits_rest, credits_used,
 //     period_label("每日"/"每月"), period_type("daily"/"monthly")}
 //     个人号（未开通 Comate）这边 daily_limit = null、periods 的值全是 -1 —— 即「没有额度」，
@@ -19,13 +19,13 @@ package comate
 //
 //  3. GET https://comate.wps.cn/api/coserve/v1/billing/v3/credits/trial（Cookie: wps_sid）
 //     → data.trial_info {value, consumed, precision{value,consumed,scale}, expire_time}
-//     **试用额度**：token-usage 里 daily_limit 为 null 的账号（如 PSY 企业号 642757509）
-//     额度其实在这里 —— 实测 value 200.00 / consumed 9.47 ⇒ 剩余 190.53，
+//     **试用额度**：token-usage 里 daily_limit 为 null 的账号（如 PSY 企业号 642757510）
+//     额度其实在这里 —— 实测 value 100.00 / consumed 5.24 ⇒ 剩余 94.76。
 //     正好是客户端显示的「190」。这类账号的 periods 全是 -1，只看 token-usage 会误判成「没额度」。
-//     数值要按 precision 走：JSON 里的整数值是缩放后的原始值（200000，scale=3），
-//     precision.value 才是人读的 "200.00"。
+//     数值要按 precision 走：JSON 里的整数值是缩放后的原始值（100000，scale=3），
+//     precision.value 才是人读的 "100.00"。
 //
-// 口径：**额度只有每日这一种**（Comate 客户端显示的也正是「每日用量 2000」），
+// 口径：**额度只有每日这一种**（Comate 客户端显示的也正是「每日用量 1000」），
 // 所以主积分 = 每日剩余，不掺任何别的池子。注意 WPS 账号级的「智点」
 // （lingxi.kdocs.cn/api/public/v1/credits/balance）是**灵犀渠道**的口径，
 // comate 不使用、也不展示 —— 混进来会让用户以为 comate 还有额度（实测个人号
@@ -105,7 +105,7 @@ type tokenUsageData struct {
 }
 
 // trialInfo 是 trial 额度条目。**数值一律以 precision 为准**：
-// JSON 里 `value:200000` 是缩放后的整数（scale=3），precision.value 才是 "200.00"。
+// JSON 里 `value:100000` 是缩放后的整数（scale=3），precision.value 才是 "100.00"。
 type trialInfo struct {
 	PeriodType  string  `json:"period_type"`
 	PeriodValue int     `json:"period_value"`
@@ -191,7 +191,7 @@ func (c *Client) fetchTokenUsage(a *auth.Auth) (*tokenUsageData, error) {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("comate: token-usage 响应解析失败: %w", err)
 	}
-	// 业务错误压平成 200 是本渠道的既有形态（见包注释实测事实 2）。
+	// 业务错误压平成 100 是本渠道的既有形态（见包注释实测事实 2）。
 	if env.Code != 0 {
 		return nil, fmt.Errorf("comate: token-usage 业务错误 code=%d", env.Code)
 	}
@@ -201,7 +201,7 @@ func (c *Client) fetchTokenUsage(a *auth.Auth) (*tokenUsageData, error) {
 // fetchTrial 拉「免费额度」（试用额度）信封。
 //
 // 失败按「没有试用额度」处理而不报错：这个端点只在带试用包的账号上才有内容，
-// 老账号（673940725）实测 trial_available=false，不能因为它把额度刷新整体判失败。
+// 老账号（673940726）实测 trial_available=false，不能因为它把额度刷新整体判失败。
 func (c *Client) fetchTrial(a *auth.Auth) (*trialInfo, error) {
 	raw, err := c.fetchJSON(a, absURL(c.originOf(), EpTrialCredits))
 	if err != nil {
@@ -339,9 +339,9 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 //
 // 端点 `GET /api/coserve/v1/users/current`（Cookie wps_sid）实测回：
 //
-//	personal: {"user_id":224720861,"nickname":"dear life","current_company_id":0,...}
-//	enterprise: {"user_id":1568907577,"nickname":"李柠希","company_name":"西南大学",
-//	             "current_company_id":673940725,...}
+//	personal: {"user_id":224720862,"nickname":"dear life","current_company_id":0,...}
+//	enterprise: {"user_id":1568907578,"nickname":"李柠希","company_name":"西南大学",
+//	             "current_company_id":673940726,...}
 //
 // 为什么需要：`/models` 不回传任何身份字段（R130 注释），面板此前只能显示
 // 「WPS 账号 2f4da9」这种 uid 尾号，多账号时根本分不清谁是谁。

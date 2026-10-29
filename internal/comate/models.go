@@ -17,7 +17,7 @@ import (
 // remoteModel 是 /models 响应 data.items 数组元素的形状（字段按需取用）。
 type remoteModel struct {
 	DisplayName     string   `json:"display_name"`
-	Name            string   `json:"name"` // 上游完整 ID，如 673940725/zhipu/glm-5.3-flash//public
+	Name            string   `json:"name"` // 上游完整 ID，如 673940726/zhipu/glm-5.3-flash//public
 	Description     string   `json:"description"`
 	LLMTypes        []string `json:"llm_types"` // llm-chat / llm-multimodal
 	ContextWindow   int64    `json:"context_window"`
@@ -187,7 +187,7 @@ func enrichModelInfo(mi provider.ModelInfo, m remoteModel) provider.ModelInfo {
 }
 
 // prettifyID 把上游完整 ID 变成可读展示名（仅在上游未给 display_name 时兜底）。
-// 形态：673940725/zhipu/glm-5.3-flash//public → GLM-5.3 Flash。
+// 形态：673940726/zhipu/glm-5.3-flash//public → GLM-5.3 Flash。
 //
 // ⚠️ 单段 ID（无 "/"，如 glm-5.3-flash）必须有兜底分支：旧实现直接取
 // `parts[len(parts)-2]` ⇒ 越界 panic（index out of range [-1]），而上游

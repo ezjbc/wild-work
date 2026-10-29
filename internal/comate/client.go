@@ -120,8 +120,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 	// 本地校验：集合 == 暴露集 == /models items（构造即一致）；目录未拉到过时放行
 	//（fail-open，R42：校验过严会误拒上游新模型）。
+	//
+	// 状态码必须是 **400 而不是 404**：404 会被 Classify 归成 ErrNotFound，而这个错误是
+	// **本地**判定的请求错误（模型 id 不在我们已经拉到的目录里），上游一次都没碰。用 404
+	// 会让 handler 认为「这个号不行」去换号，换到另一个号照样被本地拒，每次轮换都记一笔账号
+	// 错误 ⇒ 实测两个号各记两笔后整条渠道进入冷却，正常请求也被拒（11:04 事故）。
+	// 400 走 badParams ⇒ ErrClient：不换号、不罚账号，直接把「模型 id 不对」告诉调用方。
 	if !c.knownModel(m) {
-		return nil, http.StatusNotFound,
+		return nil, http.StatusBadRequest,
 			[]byte(fmt.Sprintf(`{"error":{"message":"model not found in comate catalog: %s","code":"model_not_found"}}`, jsonEscape(m))), nil
 	}
 
