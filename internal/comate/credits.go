@@ -19,7 +19,7 @@ package comate
 //
 //  3. GET https://comate.wps.cn/api/coserve/v1/billing/v3/credits/trial（Cookie: wps_sid）
 //     → data.trial_info {value, consumed, precision{value,consumed,scale}, expire_time}
-//     **试用额度**：token-usage 里 daily_limit 为 null 的账号（如 PSY 企业号 642757510）
+//     **试用额度**：token-usage 里 daily_limit 为 null 的账号（如 PSY 企业号 642757509）
 //     额度其实在这里 —— 实测 value 200.00 / consumed 9.47 ⇒ 剩余 190.53，
 //     正好是客户端显示的「190」。这类账号的 periods 全是 -1，只看 token-usage 会误判成「没额度」。
 //     数值要按 precision 走：JSON 里的整数值是缩放后的原始值（200000，scale=3），
@@ -201,7 +201,7 @@ func (c *Client) fetchTokenUsage(a *auth.Auth) (*tokenUsageData, error) {
 // fetchTrial 拉「免费额度」（试用额度）信封。
 //
 // 失败按「没有试用额度」处理而不报错：这个端点只在带试用包的账号上才有内容，
-// 老账号（673940726）实测 trial_available=false，不能因为它把额度刷新整体判失败。
+// 老账号（673940725）实测 trial_available=false，不能因为它把额度刷新整体判失败。
 func (c *Client) fetchTrial(a *auth.Auth) (*trialInfo, error) {
 	raw, err := c.fetchJSON(a, absURL(c.originOf(), EpTrialCredits))
 	if err != nil {
@@ -339,9 +339,9 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 //
 // 端点 `GET /api/coserve/v1/users/current`（Cookie wps_sid）实测回：
 //
-//	personal: {"user_id":224720862,"nickname":"dear life","current_company_id":0,...}
-//	enterprise: {"user_id":1568907578,"nickname":"李柠希","company_name":"西南大学",
-//	             "current_company_id":673940726,...}
+//	personal: {"user_id":224720861,"nickname":"dear life","current_company_id":0,...}
+//	enterprise: {"user_id":1568907577,"nickname":"李柠希","company_name":"西南大学",
+//	             "current_company_id":673940725,...}
 //
 // 为什么需要：`/models` 不回传任何身份字段（R130 注释），面板此前只能显示
 // 「WPS 账号 2f4da9」这种 uid 尾号，多账号时根本分不清谁是谁。

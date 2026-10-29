@@ -112,6 +112,49 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	return out, nil
 }
 
+// FetchModelPricing 实现 provider.Upstream：把 /models 的 consume_ratio 当倍率上报
+// （R136「把 model 补上」的一半——模型清单早已动态透传，缺的是每款的消耗倍率）。
+//
+// 上游事实：每款模型带 `consume_ratio`（实测 0.04 ~ 0.75），它就是「按 token 计费时
+// 每 token 消耗的积分系数」——usage.credits 与它对得上（≈ consume_ratio × tokens / 1000
+// 量级），故可作为面板「倍率」列的真值，Explicit=true（不是猜的）。
+//
+// consume_ratio 为 0/缺失时不猜：Rate=0 + Explicit=false，面板显示「未知」而不是
+// 「免费」（R5 约定；loomy 曾因共享同一个 explicit 指针让这条约定静默失效，见其注释）。
+func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
+	raw, err := c.getJSON(a, EpModels)
+	if err != nil {
+		return nil, err
+	}
+	var rec modelsResp
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return nil, fmt.Errorf("comate: /models 响应解析失败: %w", err)
+	}
+	if rec.Code != 0 {
+		return nil, fmt.Errorf("comate: /models 返回 code=%d msg=%s", rec.Code, rec.Msg)
+	}
+	out := make([]provider.ModelPricing, 0, len(rec.Data.Items))
+	seen := map[string]bool{}
+	for _, m := range rec.Data.Items {
+		id := strings.TrimSpace(m.Name)
+		if id == "" || seen[id] || m.ConsumeRatio <= 0 {
+			continue
+		}
+		seen[id] = true
+		// 每条独立取址：共享同一个 bool 会让所有条目的 Explicit 恒等于末值。
+		explicit := true
+		out = append(out, provider.ModelPricing{
+			Model:    id,
+			Channel:  string(Kind),
+			Rate:     m.ConsumeRatio,
+			Note:     strings.TrimSpace(m.ModelTier),
+			Explicit: &explicit,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	return out, nil
+}
+
 // modelInfoOf 组装单条模型信息：基础字段来自上游 items[]。
 // 上下文/多模态/思考能力上游**有**权威声明（ContextFromAPI=true），
 // 但本函数只拿 id/name —— 能力字段在 FetchModels 里按 remoteModel 填充。

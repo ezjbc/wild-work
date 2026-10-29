@@ -2,6 +2,7 @@ package comate
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -489,5 +490,243 @@ func TestFetchModelsEmptyDirKeepsCache(t *testing.T) {
 	c2.Base = srv.URL
 	if _, err := c2.FetchModels(a); err == nil {
 		t.Fatal("冷启动遇到空目录应返回错误")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 积分/额度（R136）：真实 wire 形态见 credits.go 注释
+// ---------------------------------------------------------------------------
+
+// tokenUsageEnterprise 企业号实测形态（每日额度 2000 / 已用 142.63 / 剩余 1857.37）。
+const tokenUsageEnterprise = `{"code":0,"msg":"","data":{"companyId":"673940725","userId":"1568907577",` +
+	`"credits":{"allocations":[],"daily_limit":{"limit":2000,"remain":1857.37,"used":142.63},` +
+	`"mixed_priority":"credits","seat":null,"usage_mode":"mixed"},` +
+	`"credits_usage":{"periods":[{"credits_limit":2000,"credits_rest":1857.37,"credits_used":142.63,` +
+	`"period_label":"每日","period_type":"daily"}]}}}`
+
+// tokenUsagePersonal 个人号（未开通 Comate）实测形态：daily_limit 为 null，
+// periods 两项 limit/rest 全为 -1 —— 「没有额度」而不是「用光」。
+const tokenUsagePersonal = `{"code":0,"msg":"","data":{"companyId":"0","userId":"224720861",` +
+	`"credits":{"allocations":[],"daily_limit":null,"mixed_priority":"credits","usage_mode":"mixed"},` +
+	`"credits_usage":{"periods":[{"credits_limit":-1,"credits_rest":-1,"credits_used":0,` +
+	`"period_label":"每日","period_type":"daily"},{"credits_limit":-1,"credits_rest":-1,"credits_used":0,` +
+	`"period_label":"每月","period_type":"monthly"}]}}}`
+
+// creditsFake 起一个假上游：/token-usage 与 /users/current 走 Origin，
+// /models 与 users/current 分别在 llmproxy 与主域根；两个 origin 都指向同一台 httptest。
+// trialBody 是 PSY 企业号（642757509）的真实试用额度形态：
+// JSON 数值是缩放后的原始值（scale=3），precision 里才是人读的 "200.00"/"9.47"。
+const trialBody = `{"code":0,"msg":"success","data":{"trial_available":true,"with_precision":true,` +
+	`"trial_info":{"period_type":"","period_value":0,"value":200000,"expire_time":1795772189,` +
+	`"consumed":9470,"precision":{"value":"200.00","consumed":"9.47","scale":3}}}}`
+
+// trialNone 是老账号（673940725）的形态：没有试用包。
+const trialNone = `{"code":0,"msg":"success","data":{"trial_available":false}}`
+
+func creditsFake(t *testing.T, tokenUsage string, trial ...string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 三个端点都必须带 Cookie 鉴权（Bearer 一律 401，见包注释实测事实 1）。
+		if r.Header.Get("Cookie") != CookieName+"="+fakeSID {
+			w.WriteHeader(401)
+			_, _ = w.Write([]byte(notLoginBody))
+			return
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("%s 不应带 Authorization（comate 只认 Cookie）", r.URL.Path)
+		}
+		switch r.URL.Path {
+		case "/llmproxy/v1/user" + EpTokenUsage: // 幂等：必须挂在 APIBase 前缀下
+			_, _ = w.Write([]byte(tokenUsage))
+		case EpTrialCredits:
+			body := trialNone
+			if len(trial) > 0 {
+				body = trial[0]
+			}
+			_, _ = w.Write([]byte(body))
+		case EpUserCurrent:
+			_, _ = w.Write([]byte(`{"code":0,"data":{"user_id":1568907577,"nickname":"李柠希",` +
+				`"company_name":"西南大学","current_company_id":673940725,"status":"active"}}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := New()
+	// Base 带真实前缀：token-usage 必须拼在 /llmproxy/v1/user 之后
+	// （拼到主域根会拿到一页 HTML，R136 实测踩过）。
+	c.Base = srv.URL + "/llmproxy/v1/user"
+	c.Origin = srv.URL // users/current 在主域根
+	return c
+}
+
+// TestUserResourceEnterpriseQuota 主积分 = 每日额度剩余（1857.37 → 1857）。
+func TestUserResourceEnterpriseQuota(t *testing.T) {
+	c := creditsFake(t, tokenUsageEnterprise)
+	remain, err := c.UserResource(&auth.Auth{AccessToken: fakeSID})
+	if err != nil {
+		t.Fatalf("UserResource: %v", err)
+	}
+	if remain != 1857 {
+		t.Fatalf("remain = %d, want 1857（每日额度剩余 1857.37 四舍五入）", remain)
+	}
+}
+
+// TestUserResourcePersonalNoQuota 个人号：上游回 -1 / null，必须回 (0, nil)
+// —— 「没有额度」是中性事实，回 error 会让面板显示「刷新失败」。
+func TestUserResourcePersonalNoQuota(t *testing.T) {
+	c := creditsFake(t, tokenUsagePersonal)
+	remain, err := c.UserResource(&auth.Auth{AccessToken: fakeSID})
+	if err != nil {
+		t.Fatalf("个人号（无额度）不应报错: %v", err)
+	}
+	if remain != 0 {
+		t.Fatalf("remain = %d, want 0（周期额度 -1 表示没有额度）", remain)
+	}
+}
+
+// TestUserResourceDetailDailyOnly 明细只有每日额度这一条：
+// 「智点」是灵犀渠道的口径，comate 绝不能掺进来（用户明确纠正过）。
+func TestUserResourceDetailDailyOnly(t *testing.T) {
+	c := creditsFake(t, tokenUsageEnterprise)
+	remain, items, err := c.UserResourceDetail(&auth.Auth{AccessToken: fakeSID})
+	if err != nil {
+		t.Fatalf("UserResourceDetail: %v", err)
+	}
+	if remain != 1857 {
+		t.Fatalf("主积分 = %d, want 1857", remain)
+	}
+	if len(items) != 1 {
+		t.Fatalf("明细 %d 条, want 1（只有每日额度）: %+v", len(items), items)
+	}
+	daily := items[0]
+	if daily.Key != "daily" || daily.Total != 2000 || daily.Used != 143 || daily.Remain != 1857 {
+		t.Fatalf("每日额度条目不对: %+v", daily)
+	}
+	if daily.ExpireAt == "" {
+		t.Fatal("每日额度应带当日有效期（面板据此算「即将过期」）")
+	}
+	for _, it := range items {
+		if it.Key != "daily" {
+			t.Fatalf("不得出现非额度条目（智点属灵犀渠道）: %+v", it)
+		}
+	}
+}
+
+// TestQuotaItemsSkipsNoLimit 上游的 -1 不是 0：既不能算成「0 可用」，也不能塞条目。
+func TestQuotaItemsSkipsNoLimit(t *testing.T) {
+	d := &tokenUsageData{}
+	d.CreditsUsage.Periods = []creditPeriod{
+		{Limit: -1, Rest: -1, Label: "每日", Type: "daily"},
+		{Limit: -1, Rest: -1, Label: "每月", Type: "monthly"},
+	}
+	items, primary := quotaItems(d)
+	if len(items) != 0 || primary != 0 {
+		t.Fatalf("items=%d primary=%d, want 0/0", len(items), primary)
+	}
+}
+
+// TestUserResourceTokenUsageError 上游 5xx 必须是 error（与「没有额度」区分开）。
+func TestUserResourceTokenUsageError(t *testing.T) {
+	c := creditsFake(t, "")
+	if _, err := c.UserResource(&auth.Auth{AccessToken: fakeSID}); err == nil {
+		t.Fatal("上游 404 应返回 error")
+	}
+}
+
+// TestFetchProfileDisplayName 昵称补全：企业号显示「昵称（企业名）」。
+func TestFetchProfileDisplayName(t *testing.T) {
+	c := creditsFake(t, tokenUsageEnterprise)
+	nick, company, err := c.fetchProfile(&auth.Auth{AccessToken: fakeSID})
+	if err != nil {
+		t.Fatalf("fetchProfile: %v", err)
+	}
+	if got := DisplayName(nick, company); got != "李柠希（西南大学）" {
+		t.Fatalf("DisplayName = %q", got)
+	}
+	if got := DisplayName("dear life", ""); got != "dear life" {
+		t.Fatalf("个人号 DisplayName = %q", got)
+	}
+	if got := DisplayName("", ""); got != "" {
+		t.Fatalf("空身份应回空串（调用方回退 uid 尾号），got %q", got)
+	}
+}
+
+// TestTrialAmountsUsesPrecision 数值必须按 precision 还原。
+//
+// 上游 JSON 里 value=200000 是 scale=3 的原始值，直接当积分数会显示 200000；
+// 只看 value 不看 precision 是这类「带精度字段」接口最常见的踩坑。
+func TestTrialAmountsUsesPrecision(t *testing.T) {
+	info := &trialInfo{Value: 200000, Consumed: 9470}
+	info.Precision.Value = "200.00"
+	info.Precision.Consumed = "9.47"
+	info.Precision.Scale = 3
+	total, used, remain := trialAmounts(info)
+	if total != 200 || used != 9.47 || math.Abs(remain-190.53) > 1e-9 {
+		t.Fatalf("trialAmounts = (%v,%v,%v), want (200, 9.47, 190.53)", total, used, remain)
+	}
+	// 没有 precision 时按 scale 还原。
+	bare := &trialInfo{Value: 200000, Consumed: 9470}
+	bare.Precision.Scale = 3
+	if total, used, _ := trialAmounts(bare); total != 200 || math.Abs(used-9.47) > 1e-9 {
+		t.Fatalf("无 precision 时 scale 还原失败: (%v,%v)", total, used)
+	}
+}
+
+// TestUserResourceFallsBackToTrial 每日额度为 -1 的账号，主积分必须回退到免费额度。
+//
+// PSY 企业号就是这一种：token-usage 的 daily_limit=null、periods 全 -1，
+// 但 billing/v3/credits/trial 有 200-9.47；只看 token-usage 会误判成「没有额度」。
+func TestUserResourceFallsBackToTrial(t *testing.T) {
+	c := creditsFake(t, tokenUsagePersonal, trialBody)
+	remain, err := c.UserResource(&auth.Auth{AccessToken: fakeSID})
+	if err != nil {
+		t.Fatalf("UserResource: %v", err)
+	}
+	if remain != 191 {
+		t.Fatalf("remain = %d, want 191（190.53 四舍五入）", remain)
+	}
+}
+
+// TestUserResourceDetailIncludesTrialAsSeparateItem 免费额度独立成条，且不顶掉每日额度。
+func TestUserResourceDetailIncludesTrialAsSeparateItem(t *testing.T) {
+	// 每日额度在时：主积分仍是每日，免费额度只作明细。
+	c := creditsFake(t, tokenUsageEnterprise, trialBody)
+	primary, items, err := c.UserResourceDetail(&auth.Auth{AccessToken: fakeSID})
+	if err != nil {
+		t.Fatalf("UserResourceDetail: %v", err)
+	}
+	if primary != 1857 {
+		t.Fatalf("primary = %d, want 1857（每日额度优先）", primary)
+	}
+	var trial *provider.ResourceItem
+	for i := range items {
+		if items[i].Key == "trial" {
+			trial = &items[i]
+		}
+	}
+	if trial == nil {
+		t.Fatalf("明细里缺 trial 条目: %+v", items)
+	}
+	if trial.Total != 200 || trial.Used != 9 || trial.Remain != 191 {
+		t.Fatalf("trial 条目 = %+v, want total 200 used 9 remain 191", *trial)
+	}
+	if !strings.HasPrefix(trial.ExpireAt, "2026-") || !strings.Contains(trial.ExpireAt, "T") {
+		t.Fatalf("trial 有效期应为 RFC3339 精确时刻，实际 %q", trial.ExpireAt)
+	}
+	if trial.Name != "免费额度" {
+		t.Fatalf("名称应为「免费额度」（客户端同文案），实际 %q", trial.Name)
+	}
+}
+
+// TestUserResourceTrialAbsentKeepsZero 没有试用包的账号：主积分 0，不报错。
+func TestUserResourceTrialAbsentKeepsZero(t *testing.T) {
+	c := creditsFake(t, tokenUsagePersonal, trialNone)
+	remain, err := c.UserResource(&auth.Auth{AccessToken: fakeSID})
+	if err != nil {
+		t.Fatalf("UserResource: %v", err)
+	}
+	if remain != 0 {
+		t.Fatalf("remain = %d, want 0", remain)
 	}
 }
