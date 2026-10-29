@@ -42,6 +42,7 @@ import (
 	"wild-work/internal/glm"
 	"wild-work/internal/kilo"
 	"wild-work/internal/ledger"
+	"wild-work/internal/lingxi"
 	"wild-work/internal/lobsterai"
 	"wild-work/internal/loomy"
 	"wild-work/internal/loopguard"
@@ -198,6 +199,13 @@ func main() {
 	if err != nil {
 		fatal("读取 Comate 账号目录失败：%v", err)
 	}
+	// Lingxi：粘贴型渠道，凭据同为 WPS 账号的 wps_sid Cookie（灵犀侧门禁独立，须灵犀已开通），
+	// 由面板「粘贴 wps_sid」写入 auths/lingxi-*.json。Cookie 不轮换 ⇒ 无 refresh/保活；
+	// 但有每日签到（领智点），由调度器按 checkinMinutes 执行。
+	lxAuths, err := auth.LoadLingxiDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 Lingxi 账号目录失败：%v", err)
+	}
 	// OfficeAce：导入型渠道，凭据由面板从本机 OfficeAce 客户端文件发现或自助 OAuth 登录写入 auths/。
 	oaAuths, err := auth.LoadOfficeAceDir(cfg.AuthDir)
 	if err != nil {
@@ -234,8 +242,8 @@ func main() {
 	if err != nil {
 		fatal("读取 CodeArts 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, comate=%d, officeace=%d, oczen=%d(匿名), kilo=%d(匿名), minimax=%d, lobsterai=%d, zcode=%d, gemini=%d, codearts=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(cmAuths), len(oaAuths), len(ocAuths), len(kiAuths), len(mimAuths), len(lobAuths), len(zcdAuths), len(gemAuths), len(caAuths), cfg.AuthDir)
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, comate=%d, lingxi=%d, officeace=%d, oczen=%d(匿名), kilo=%d(匿名), minimax=%d, lobsterai=%d, zcode=%d, gemini=%d, codearts=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(cmAuths), len(lxAuths), len(oaAuths), len(ocAuths), len(kiAuths), len(mimAuths), len(lobAuths), len(zcdAuths), len(gemAuths), len(caAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -297,6 +305,11 @@ func main() {
 	cmPool := pool.New(filepath.Join(stateDir, "state-comate.json"))
 	for _, a := range cmAuths {
 		cmPool.Add(a)
+	}
+	// Lingxi：真多账号池（一份 wps_sid = 一个 WPS 账号，灵犀侧开通），不置 SingleAccount。
+	lxPool := pool.New(filepath.Join(stateDir, "state-lingxi.json"))
+	for _, a := range lxAuths {
+		lxPool.Add(a)
 	}
 	// OfficeAce：真多账号池（每个华为账号一份凭据），不置 SingleAccount。
 	oaPool := pool.New(filepath.Join(stateDir, "state-officeace.json"))
@@ -379,6 +392,10 @@ func main() {
 	// Comate：与 cline 同款——非流式 client 保留总超时；StreamHTTP 不设 Timeout（R35）。
 	cmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	cmUp.StreamHTTP.Transport = cmUp.HTTP.Transport
+	lxUp := lingxi.New()
+	// Lingxi：与 comate 同款——非流式 client 保留总超时；StreamHTTP 不设 Timeout（R35）。
+	lxUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	lxUp.StreamHTTP.Transport = lxUp.HTTP.Transport
 	oaUp := officeace.New()
 	// OfficeAce 上游为华为 AgentArts 网关：恒 stream=true，长回答（含思维链）常见，
 	// 非流式 client 保留总超时兜底；StreamHTTP 不设 Timeout（R35）。
@@ -454,6 +471,7 @@ func main() {
 		provider.Loomy.String():       {lmUp.HTTP, lmUp.StreamHTTP},
 		provider.Cline.String():       {clUp.HTTP, clUp.StreamHTTP},
 		provider.Comate.String():      {cmUp.HTTP, cmUp.StreamHTTP},
+		provider.Lingxi.String():      {lxUp.HTTP, lxUp.StreamHTTP},
 		provider.OfficeAce.String():   {oaUp.HTTP, oaUp.StreamHTTP},
 		provider.Oczen.String():       {ocUp.HTTP, ocUp.StreamHTTP},
 		provider.Kilo.String():        {kiUp.HTTP, kiUp.StreamHTTP},
@@ -543,6 +561,11 @@ func main() {
 	// 于是每天空跑一次必然失败的签到，并在面板渲染红色「签到失败」。
 	cmSch := scheduler.New(scheduler.Config{Pool: cmPool, Upstream: cmUp, Name: "comate",
 		CheckinMinutes: []int{}, KeepaliveHours: []int{}, Ledger: lg})
+	// Lingxi：有每日签到（daily_check_in 领智点，见 internal/lingxi/checkin.go），
+	// 但 wps_sid Cookie 不过期、无 refresh token ⇒ 只开签到、不开保活。
+	// 签到时刻用全局配置（上游按天去重、无活动上线延迟，不设 CheckinRetryUntil）。
+	lxSch := scheduler.New(scheduler.Config{Pool: lxPool, Upstream: lxUp, Name: "lingxi",
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
 	// OfficeAce：有每日签到（bonus/claim）但要先有临时凭据（V11 签名），保活用于续期。
 	// CheckinMinutes 用全局签到时间；KeepaliveHours 用配置保活时段（临时凭据约 2h 到期）。
 	oaSch := scheduler.New(scheduler.Config{Pool: oaPool, Upstream: oaUp, Name: "officeace",
@@ -605,6 +628,7 @@ func main() {
 		provider.GLM:        {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		provider.Cline:      {Kind: provider.Cline, Pool: clPool, Upstream: clUp, StaticModels: cline.StaticModels()},
 		provider.Comate:     {Kind: provider.Comate, Pool: cmPool, Upstream: cmUp, StaticModels: comate.StaticModels()},
+		provider.Lingxi:     {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp, StaticModels: lingxi.StaticModels()},
 		provider.OfficeAce:  {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, StaticModels: officeace.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
@@ -650,6 +674,7 @@ func main() {
 		provider.GLM:         {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
 		provider.Comate:      {Kind: provider.Comate, Pool: cmPool, Upstream: cmUp, Scheduler: cmSch},
+		provider.Lingxi:      {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp, Scheduler: lxSch},
 		provider.OfficeAce:   {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
 		provider.Oczen:       {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
 		provider.Kilo:        {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, Scheduler: kiSch},
@@ -832,6 +857,8 @@ func main() {
 	// Comate 的 Run 同样不可漏（R34）：本渠道当前无任何定时任务，Run 只会阻塞等
 	// ctx/配置变更；但漏了它，将来给它加任务就会静默不跑。
 	go cmSch.Run(sctx)
+	// Lingxi 的 Run 不可漏（R34）：本渠道有每日签到任务。
+	go lxSch.Run(sctx)
 	// OfficeAce 的 Run 不可漏（R34）：本渠道有签到与保活。
 	go oaSch.Run(sctx)
 	// kilo 的 Run 同样不可漏（R34）：本渠道当前无任何定时任务，Run 只会阻塞等
@@ -875,6 +902,9 @@ func main() {
 		// 已按 InfoOnly 呈现在明细里、不参与积分算术，纳入只会刷出一个无意义的 0。
 		// CodeArts 有 benefit 额度（按 UTC+8 自然日重置）与积分账户形态，必须纳入。
 		provider.CodeArts,
+		// Lingxi 有 credits/balance 余额端点（智点）：不纳入就只在每日签到时刷一次，
+		// 对话消耗后面板数字最长滞后一个签到周期（2026-10-29 审查 W2 补登）。
+		provider.Lingxi,
 	}, app.CreditRefreshInterval)
 
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。

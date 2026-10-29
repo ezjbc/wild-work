@@ -26,11 +26,13 @@ import (
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
 	"wild-work/internal/ledger"
+	"wild-work/internal/lingxi"
 	"wild-work/internal/login"
 	logincodearts "wild-work/internal/login_codearts"
 	"wild-work/internal/login_comate"
 	logingemini "wild-work/internal/login_gemini"
 	"wild-work/internal/login_glm"
+	loginlingxi "wild-work/internal/login_lingxi"
 	loginlobsterai "wild-work/internal/login_lobsterai"
 	loginloomy "wild-work/internal/login_loomy"
 	loginminimax "wild-work/internal/login_minimax"
@@ -362,6 +364,7 @@ var channelOrder = map[provider.Kind]int{
 	provider.Gemini:    13,
 	provider.CodeArts:  14,
 	provider.Comate:    15,
+	provider.Lingxi:    16,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -372,6 +375,7 @@ var feeChannelOrder = []provider.Kind{
 	provider.QoderCOM, provider.TraeWork, provider.TraeCode, provider.QwenWork, provider.GLM,
 	provider.Cline, // 漏在此表 = 面板永远不出该渠道 tab（buildFeesChannels 只遍历本表）
 	provider.Comate,
+	provider.Lingxi,
 	provider.MonkeyCode,
 	provider.Raccoon,
 	provider.Loomy,
@@ -821,6 +825,16 @@ func init() {
 		Start:    loginraccoon.Start,
 		Poll:     wrapPoll(loginraccoon.Poll, loginraccoon.ErrPending, func(a *App, r loginraccoon.Result) error { a.completeRaccoonLogin(r); return nil }),
 		Shutdown: loginraccoon.Shutdown,
+	}
+	// Lingxi：WPS 灵犀网页版 CDP 捕获 wps_sid（与 Raccoon 同款范式）。粘贴路径
+	// （SubmitLingxiSID，F12 复制 Cookie）是等价入口，两条路径共用 persistLingxiAccount
+	// 入库，文件格式与同账号告警语义完全一致。
+	// pollTimeout 对齐包内 10m 等待上限：通用 5m 会先到、关掉还在等用户登录的浏览器。
+	loginFlows[provider.Lingxi] = &loginFlow{
+		Start:       loginlingxi.Start,
+		Poll:        wrapPoll(loginlingxi.Poll, loginlingxi.ErrPending, func(a *App, r loginlingxi.Result) error { return a.completeLingxiLogin(r) }),
+		Shutdown:    loginlingxi.Shutdown,
+		pollTimeout: loginlingxi.PollTimeout,
 	}
 
 	// —— 不通过本表发起的渠道（改造前 A 表的四种语义，现统一为说明文字）——
@@ -1715,6 +1729,79 @@ func comateNickname(uid string) string {
 	return "WPS 账号 " + uid[len(uid)-6:]
 }
 
+// completeLingxiLogin CDP 自动登录（login_lingxi）成功后的收尾：入库。
+//
+// 与其它 CDP 渠道的 complete*Login 同构（wrapPoll 的 done 闭包上抛错误由 pollLogin 展示）；
+// 落盘走 persistLingxiAccount，与粘贴路径 SubmitLingxiSID 完全一致。
+func (a *App) completeLingxiLogin(r loginlingxi.Result) error {
+	warn, err := a.persistLingxiAccount(r.SID, r.UID)
+	if err != nil {
+		// persist 内部（SaveAtomic 失败）已带「保存 Lingxi 凭据失败」前缀，这里不再重复包装。
+		return err
+	}
+	// 日志零 token（不变量 2）：只打 uid，绝不打完整 sid
+	log.Printf("lingxi 账号已添加（自动登录）uid=%s 同账号告警=%v", r.UID, warn != "")
+	return nil
+}
+
+// SubmitLingxiSID 提交用户粘贴的 wps_sid Cookie（灵犀渠道）：验证 → 落盘 → 重载账号池。
+//
+// 与 comate 的差异：验证走 GET plans 端点（零智点消耗），且能在验证阶段就发现
+// 「灵犀侧未开通」（result=UserUnauthorized）——同一个 wps_sid 在 comate 与灵犀
+// 是两道独立门禁，提前拦在这里可避免入库一个必然空目录的账号。
+//
+// 同账号检测：wps_sid 与已入库 lingxi 账号逐字比对（智点按 WPS 账号计）。
+func (a *App) SubmitLingxiSID(sid string) (string, string, error) {
+	s := strings.TrimSpace(sid)
+	if s == "" {
+		return "", "", errors.New("wps_sid 不能为空")
+	}
+	uid, err := lingxi.ValidateSID(s)
+	if err != nil {
+		return "", "", err
+	}
+	warn, err := a.persistLingxiAccount(s, uid)
+	if err != nil {
+		return "", "", err
+	}
+	// 日志零 token（不变量 2）：只打 uid，绝不打完整 sid
+	log.Printf("lingxi 账号已添加（粘贴 wps_sid）uid=%s 同账号告警=%v", uid, warn != "")
+	return uid, warn, nil
+}
+
+// persistLingxiAccount lingxi 账号入库的唯一路径：同账号检测 → 落盘 → 重载账号池。
+// 与 persistComateAccount 同构；返回同账号告警文案（空串=无告警）与入库错误。
+func (a *App) persistLingxiAccount(sid string, uid string) (string, error) {
+	// 同账号检测：与已入库 lingxi 账号的 sid 逐字比对。
+	warn := ""
+	if existing, lerr := auth.LoadLingxiDir(a.cfg.AuthDir); lerr == nil {
+		for _, e := range existing {
+			if e.AccessTokenValue() == sid {
+				warn = fmt.Sprintf("这个 wps_sid 与已添加的账号 %s 相同（智点按 WPS 账号计），"+
+					"重复添加不会增加可用智点。请换一个 WPS 账号的 wps_sid。", e.UID)
+				break
+			}
+		}
+	}
+
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	la := &auth.Auth{
+		Kind:        "lingxi",
+		UID:         uid,
+		Nickname:    "WPS 账号 " + uid[len(uid)-6:],
+		AccessToken: sid,
+		// Cookie 无过期概念：ExpiresAt 必须远期，0 会让 NeedsRefresh 恒真（不变量 21 同款陷阱）
+		ExpiresAt: lingxi.FarFutureExpiry(),
+		FilePath:  filepath.Join(a.cfg.AuthDir, "lingxi-"+uid+".json"),
+	}
+	if err := la.SaveAtomic(); err != nil {
+		return "", fmt.Errorf("保存 Lingxi 凭据失败：%w", err)
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Lingxi)
+	return warn, nil
+}
+
 // StartComateQRLogin 发起 WPS Comate「扫码登录」：服务端向 qr.wps.cn 申请二维码，
 // 面板显示二维码，用户用手机 WPS 扫码确认后，服务端自己换出 wps_sid 并落盘。
 //
@@ -2227,6 +2314,15 @@ func (a *App) reloadAccounts() {
 		auths, err := auth.LoadComateDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload comate accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	// Lingxi：一个 WPS 账号一份 wps_sid（灵犀侧开通），凭据由面板「粘贴 wps_sid」写入。
+	if rt := a.runtime(provider.Lingxi); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadLingxiDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload lingxi accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}
@@ -4039,6 +4135,21 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		uid, warn, err := a.SubmitComateSID(req.SID)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	})
+	mux.HandleFunc("POST /api/login/lingxi_sid", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			SID string `json:"sid"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, warn, err := a.SubmitLingxiSID(req.SID)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
