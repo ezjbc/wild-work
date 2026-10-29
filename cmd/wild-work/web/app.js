@@ -872,10 +872,10 @@ const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // 无积分概念的渠道（匿名通道）：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
 // 内建名单只有 oczen/kilo/cline/comate；自定义渠道（R66）同样无积分，但渠道名是用户配置的、
 // 运行期可增删，故运行时以后端下发的 custom_channels 动态判定（isCustomGroup）。
-const NO_CREDITS_BUILTIN = new Set(["oczen", "kilo", "cline", "comate"]);
+const NO_CREDITS_BUILTIN = new Set(["oczen", "kilo", "cline"]);
 // 虚拟账号渠道：没有账号概念（oczen 匿名通道 / kilo 免费池），卡片只留 🔒 静态指示，
 // 不可停用/删除/改名（后端 RemoveAccount/DisableAccount 也硬拒）。
-// 与 NO_CREDITS_BUILTIN 是**两个维度**：cline/comate 属「无积分但可删可停」，
+// 与 NO_CREDITS_BUILTIN 是**两个维度**：cline 属「无积分但可删可停」，
 // 故不得用「无积分」推导「固定账号」（R130 修正）。
 const VIRTUAL_ACCOUNTS = new Set(["oczen", "kilo"]);
 // isVirtualAcct 「默认收起」（R103）的判据：只看是否虚拟账号，不看 credits_na。
@@ -1150,6 +1150,13 @@ function renderAccounts() {
     const disabledClass = a.disabled ? " disabled" : "";
     const disableIcon = a.disabled ? "▶" : "⏸";
     const disableTitle = a.disabled ? "启用" : "停用";
+    // 停用原因徽标（R135）：账号被「自动停用」时（典型：这个 WPS 账号在 Comate 侧
+    // 一个模型都没有），卡片原本只有灰底 + ▶，用户既不知道为什么被停，也不知道
+    // 点 ▶ 有没有用。后端 pool.Status 已带 reason（手工停用是「手动停用」）。
+    const disabledReason = String(a.reason || "");
+    const disabledTag = (a.disabled && disabledReason)
+      ? `<span class="tag neutral" title="${esc(disabledReason)}">已停用 · ${esc(disabledReason.length > 16 ? disabledReason.slice(0, 16) + "…" : disabledReason)}</span>`
+      : "";
 
     // 冷却标签（后端 pool.Status 已透出 cooling/until/reason，此前前端未渲染）。
     // 为什么需要：账号被冷却时挑号会跳过它，表现为「积分明明很多却报 503/上游限流」,
@@ -1243,7 +1250,7 @@ function renderAccounts() {
       <div class="acct-uid">UID: ${esc(shortUid(a.uid))}</div>
       <div class="acct-mid">
         <div class="acct-credits${noCredits ? "" : " clickable"}" data-uid="${a.uid}"${noCredits ? "" : ` onclick="showCreditDetail(event,'${a.uid}')" title="点击查看积分明细（含分页）" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showCreditDetail(event,'${a.uid}')}"`}>${creditsText(a)}</div>
-        <div class="acct-checkin">${coolingTag}${sessionDeadTag}${missingRTTag}${checkinTag}</div>
+        <div class="acct-checkin">${coolingTag}${disabledTag}${sessionDeadTag}${missingRTTag}${checkinTag}</div>
       </div>
     </div>`;
   }).join("");

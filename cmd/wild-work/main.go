@@ -881,6 +881,13 @@ func main() {
 	// 否则刚启动时费率缓存为空，面板下方全是 unknown（需手动点刷新才正常）。
 	appInst.StartPricingAutoRefresh(sctx, app.PricingRefreshInterval)
 
+	// Comate 空目录账号巡检（R135）：SubmitComateSID 只挡「新增」账号，
+	// 而线上已有一批在 R135 之前加进去、账号侧一个模型都没有的 WPS 号。
+	// 它们按 uid 顺序被选走 → mock 帧「未配置可用模型」→ 整条渠道对所有人失败，
+	// 且该帧是 HTTP 200，handler 无法在同一请求内换号。
+	// 故启动后异步扫一遍（零积分、一次 GET /models/账号），把这类号停用。
+	go appInst.SweepComateEmptyAccounts()
+
 	// 运行统计喂入器（账号状态差值/粘性路由/今日作废，30s 一轮）：
 	// 进程内直调各数据源，面板「运行统计」tab 即时可用。
 	appInst.StartStatsFeeders(sctx)

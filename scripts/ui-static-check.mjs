@@ -63,13 +63,29 @@ const FAKE_STATE = {
       last_checkin_at: "",
       last_checkin_ok: false,
     },
-    // 无积分**但有真实账号**的渠道（R130）：comate 一份 wps_sid = 一个 WPS 账号，
-    // 上游无余额端点 ⇒ credits_na=true，但必须仍能删除/停用/改名
-    // （粘错 sid 时没有删除入口就永久卡死）。
+    // 有真实积分的渠道（R136）：comate 一份 wps_sid = 一个 WPS 账号，
+    // 额度来自 /llmproxy/v1/user/token-usage（每日额度 2000，剩余 1857.37），
+    // 故 credits_na 为 false、卡片主数字是真实剩余，与 cline（真查不到）区分开。
     {
       uid: "sid-0123456789abcdef",
       group: "comate",
       nickname: "粘错sid的号",
+      credits: 1857,
+      expiring_credits: 0,
+      unusable_credits: 0,
+      cooling: false,
+      until: "",
+      reason: "",
+      disabled: false,
+      last_checkin_at: "",
+      last_checkin_ok: false,
+    },
+    // 真·无积分但用户添加的账号（cline）：上游确无余额端点 ⇒ credits_na=true。
+    // 留着它才能持续验证「credits_na 不决定收起、也不决定固定账号」（R130/R131 的护栏）。
+    {
+      uid: "cline-abcdef123456",
+      group: "cline",
+      nickname: "cline无积分号",
       credits: 0,
       expiring_credits: 0,
       unusable_credits: 0,
@@ -219,6 +235,8 @@ const patched =
   + ", renderCreditDetail, showCreditDetail, __setCreditDetailState: (st, resp) => { detailState = st; detailCache = { [st.uid]: resp }; }"
   // 「不适用」默认收起（R103）：showNoCredit / acctFilter 都是 `let`，toggle 也要直接调
   + ", applyAcctFilter, toggleNoCredit, __setShowNoCredit: (v) => { showNoCredit = v; }, __setAcctFilter: (v) => { acctFilter = v; }"
+  // 停用原因徽标（R135）：需要临时把一条 fixture 账号改成「已停用 + 指定原因」再重渲染。
+  + ", __setAccount: (uid, patch) => { const a = (state.accounts || []).find((x) => x.uid === uid); if (a) Object.assign(a, patch); }"
   + " };";
 
 new Function("document", "window", "localStorage", "fetch", "location", "navigator", patched)(
@@ -248,6 +266,24 @@ check(
   (cards.match(/冷却至/g) || []).length === 1,
   `实际 ${(cards.match(/冷却至/g) || []).length} 个`
 );
+
+// ---- 场景 1.8：停用原因徽标（R135）----
+// 为什么需要：账号被「自动停用」时（R135 的典型场景——这个 WPS 账号在 Comate 侧
+// 一个模型都没有），卡片原先只有灰底 + ▶，用户既不知道为什么被停，也不知道点 ▶ 有没有用。
+// 变异点：删掉 disabledTag 的模板拼接，本节立刻变红。
+T.__setAccount("1606848467182378", {
+  cooling: false, until: "", until_ts: 0,
+  disabled: true, reason: "该账号没有可用模型（未开通 Comate），已自动停用",
+});
+T.renderAccounts();
+const disCards = document.getElementById("acctList").innerHTML;
+check("停用账号卡片显示「已停用 · 原因」徽标", /已停用 · 该账号没有可用模型/.test(disCards));
+check("停用原因完整写进 title（不被截断）",
+  disCards.includes('title="该账号没有可用模型（未开通 Comate），已自动停用"'));
+check("停用徽标只出现在被停用的账号上（健康号不带）",
+  (disCards.match(/已停用 · /g) || []).length === 1,
+  `实际 ${(disCards.match(/已停用 · /g) || []).length} 个`);
+T.__setAccount("1606848467182378", { disabled: false, reason: "" });
 check("健康号仍在（未被过滤）", cards.includes("健康号"));
 
 // ---- 场景 1.5：OfficeAce「缺 refresh_token」持久徽标（2026-10-17 用户实测要求）----
@@ -310,11 +346,12 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
     `实际 ${(cards.match(/需重新登录/g) || []).length} 个`);
 }
 
-// ---- 场景 1.75：无积分**但可删可停**的账号（R130，comate）----
+// ---- 场景 1.75：真实账号可删可停 + 有积分才有「刷新积分」（R130/R136，comate/cline）----
 // 独立缺陷：旧判据 `fixedAcct = noCredits && !isCustomGroup(...)` 把 comate 当成
 // 「固定账号」⇒ 卡片只剩 🔒，无删除/停用/改名入口；而 comate 是真多账号池
 // （一份 wps_sid = 一个 WPS 账号，后端 RemoveAccount/DisableAccount 只硬拒 oczen/kilo）
 // ⇒ 粘错 sid 就永久卡死。这里锁住「无积分≠固定账号」两个维度必须分开。
+// R136 起 comate 有真实额度端点，「无积分」这一侧改由 cline 承担护栏。
 {
   const cardOf = (name) =>
     cards.split('<div class="acct-card').find((seg) => seg.includes(name)) || "";
@@ -324,7 +361,15 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
   check("comate 卡片有删除入口（粘错 sid 能删）", /onclick="removeAcct\('sid-/.test(comateCard), comateCard.slice(0, 400));
   check("comate 卡片有停用入口", /onclick="toggleDisable\('sid-/.test(comateCard));
   check("comate 卡片名字可改（非固定账号才可编辑）", /class="acct-name editable"/.test(comateCard));
-  check("comate 无积分 ⇒ 不给「刷新积分」按钮", !comateCard.includes("refreshOne('sid-"));
+  // R136：comate 额度查得到（token-usage）⇒ 必须给「刷新积分」入口，不再是「不适用」。
+  check("comate 有积分 ⇒ 给「刷新积分」按钮", comateCard.includes("refreshOne('sid-"));
+  // 反向护栏：真查不到余额的 cline 仍不得给刷新入口（点下去只会报错）。
+  const clineCard = cardOf("cline无积分号");
+  check("cline 卡片渲染出来了", clineCard !== "");
+  check("cline 无积分 ⇒ 不给「刷新积分」按钮", !clineCard.includes("refreshOne('cline-"));
+  check("cline 同样**不得**是固定账号（无积分≠固定账号）",
+    !clineCard.includes("固定账号，不可停用/删除") && /onclick="removeAcct\('cline-/.test(clineCard),
+    clineCard.slice(0, 300));
   // 反向护栏：虚拟账号（oczen）必须仍然只有 🔒（否则「解耦」就解过头了）
   const oczenCard = cardOf("匿名");
   check("oczen 仍是固定账号（🔒 + 无删除入口）",
@@ -356,13 +401,17 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
     /data-na="\$\{isVirtualAcct\(a\) \? 1 : 0\}"/.test(raw)
       && !/naHiddenClass = \(!showNoCredit && isNoCreditAcct\(a\)\)/.test(raw));
   {
-    // 反例护栏：fixture 里的 comate 账号（credits_na=true，用户亲手粘 wps_sid 加的）
-    // 必须默认可见 —— 这就是用户报的「贴进去 wps_sid 后账号没刷出来」。
-    const comateCard = cards.split('<div class="acct-card').find((seg) => seg.includes("粘错sid的号")) || "";
-    const head = comateCard.slice(0, comateCard.indexOf(">"));
-    check("用户添加的无积分账号（comate）默认不收起",
-      comateCard !== "" && !head.includes("hidden") && head.includes('data-na="0"'),
+    // 反例护栏：fixture 里的 cline 账号（credits_na=true，用户亲手粘 sk_ key 加的）
+    // 必须默认可见 —— 这就是用户报的「贴进去 wps_sid 后账号没刷出来」的同款形态。
+    const clineCard = cards.split('<div class="acct-card').find((seg) => seg.includes("cline无积分号")) || "";
+    const head = clineCard.slice(0, clineCard.indexOf(">"));
+    check("用户添加的无积分账号（cline）默认不收起",
+      clineCard !== "" && !head.includes("hidden") && head.includes('data-na="0"'),
       head.slice(0, 160));
+    // R136：有真实额度的 comate 同样默认可见。
+    const comateCard2 = cards.split('<div class="acct-card').find((seg) => seg.includes("粘错sid的号")) || "";
+    const head2 = comateCard2.slice(0, comateCard2.indexOf(">"));
+    check("comate 账号默认不收起", comateCard2 !== "" && !head2.includes("hidden"), head2.slice(0, 160));
   }
 
   // 汇总条：收起态下不渲染 oczen 的「不适用」chip，只留一枚可点的开关。
