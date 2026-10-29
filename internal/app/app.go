@@ -402,19 +402,15 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 //   - oczen / kilo：免密免费池，根本没有账号/余额概念；
 //   - cline：上游**确无余额端点**（/credits /usage /billing /quota /me 等 12 个候选实测全 404），
 //     属于「查不到」。把这种情况显示成 0 会被误读成「额度已用光」，故同样走 NA。
+//   - comate：上游无余额端点，消耗只体现在逐请求 usage.credits 里（R130），
+//     余额永远查不到 ⇒ 同样走 NA（否则面板恒显「0 可用积分」，与「真的用光了」无法区分）。
 //   - 自定义渠道（R66）：无积分与额度接口，同样走 NA。
-//
-// ⚠️ comate **不在此列**（R136 起）：R130 曾据「/credits /userinfo /me 全 404」
-// 判成 NA，但真实额度端点是 `/llmproxy/v1/user/token-usage`（每日额度
-// limit/remain/used + 周期明细），额度只有「每日」一种口径
-// `lingxi.kdocs.cn/api/public/v1/credits/balance`。两者都在 internal/comate/credits.go
-// 里解析，面板因此能显示真实剩余并支持「刷新积分」。
 //
 // 注意：**ZCode 不走这里**（尽管它的额度也不是积分）——它有真实的 token 桶要展示，
 // 走 creditsUnit="token" 的「Token 计数」面板，而不是「不适用」（见 creditsUnit）。
 func (a *App) creditsNAKind(group string) bool {
 	if group == provider.Oczen.String() || group == provider.Kilo.String() ||
-		group == provider.Cline.String() {
+		group == provider.Cline.String() || group == provider.Comate.String() {
 		return true
 	}
 	return a.isCustomChannel(group)
@@ -1680,10 +1676,7 @@ func (a *App) SubmitComateSID(sid string) (string, string, error) {
 	}
 
 	// 同账号检测：与已入库 comate 账号的 sid 逐字比对。
-	// 顺带取回「已存在的这个账号的昵称」——用户可能在面板上手工改过名（实测就有人改成
-	// 「business」），重贴 sid 时不能把人家改的名字冲掉。
 	warn := ""
-	prevNick := ""
 	if existing, lerr := auth.LoadComateDir(a.cfg.AuthDir); lerr == nil {
 		for _, e := range existing {
 			if e.AccessTokenValue() == s {
@@ -1692,29 +1685,13 @@ func (a *App) SubmitComateSID(sid string) (string, string, error) {
 				break
 			}
 		}
-		for _, e := range existing {
-			if e.UID == uid {
-				prevNick = e.Nickname
-				break
-			}
-		}
 	}
 
 	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
-	// 昵称用上游真实身份（R136）：/api/coserve/v1/users/current 会给昵称与企业名，
-	// 比「WPS 账号 2f4da9」可读得多——多账号时一眼能分清企业号与个人号。
-	// 取不到就回退 uid 尾号（不让装饰性请求挡住保存凭据）。
-	nick := comateNicknameFor(uid, prevNick, func() (string, error) {
-		nickName, company, perr := comate.FetchProfile(s)
-		if perr != nil {
-			return "", perr
-		}
-		return comate.DisplayName(nickName, company), nil
-	})
 	ca := &auth.Auth{
 		Kind:        "comate",
 		UID:         uid,
-		Nickname:    nick,
+		Nickname:    comateNickname(uid),
 		AccessToken: s,
 		// Cookie 无过期概念：ExpiresAt 必须远期，0 会让 NeedsRefresh 恒真（不变量 21 同款陷阱）
 		ExpiresAt: comate.FarFutureExpiry(),
@@ -1750,40 +1727,16 @@ func (a *App) SubmitComateSID(sid string) (string, string, error) {
 	return uid, warn, nil
 }
 
-// comateNicknamePrefix 占位昵称前缀：R136 之前的账号昵称只有这个 + uid 尾号。
-const comateNicknamePrefix = "WPS 账号"
-
 // comateNickname 账号展示名（uid 末尾 6 位足够区分同一台机器上的多个 WPS 账号）。
-// R136 起这是**兜底**：正常路径用 comate.FetchProfile 拿真实昵称与企业名。
 func comateNickname(uid string) string {
 	if len(uid) <= 6 {
-		return comateNicknamePrefix
+		return "WPS 账号"
 	}
-	return comateNicknamePrefix + " " + uid[len(uid)-6:]
-}
-
-// comateNicknameFor 决定保存凭据时写的昵称：
-//  1. 已存在且**不是占位昵称**的名字优先 —— 那是用户自己改的，不能因为重贴 sid /
-//     自动巡检就冲掉（实测有用户把企业号改成「business」）；
-//  2. 否则取上游真实身份（昵称（企业名））；
-//  3. 再不行回退 uid 尾号，绝不让装饰性请求挡住保存凭据。
-func comateNicknameFor(uid, prev string, fetch func() (string, error)) string {
-	if p := strings.TrimSpace(prev); p != "" && !strings.HasPrefix(p, comateNicknamePrefix) {
-		return p
-	}
-	if fetch != nil {
-		if disp, err := fetch(); err == nil {
-			if d := strings.TrimSpace(disp); d != "" {
-				return d
-			}
-		}
-	}
-	return comateNickname(uid)
+	return "WPS 账号 " + uid[len(uid)-6:]
 }
 
 // SweepComateEmptyAccounts 启动后扫一遍 comate 账号的模型目录，
-// 把「一个模型都没有」的账号停用（R135）；顺带把 R136 之前入库的
-// 占位昵称（「WPS 账号 xxxxxx」）换成上游真实身份。
+// 把「一个模型都没有」的账号停用（R135）。
 //
 // 为什么需要巡检：SubmitComateSID 只挡得住**新增**的空目录账号，而线上已有一批
 // 在 R135 之前加进来的（正是「登进去看不到模型」那批用户）。这类账号留在池里会
@@ -1798,25 +1751,11 @@ func (a *App) SweepComateEmptyAccounts() {
 		log.Printf("comate 目录巡检跳过：读取账号失败 %v", err)
 		return
 	}
-	renamed := false
 	for _, au := range auths {
 		rt, _ := a.findRuntimeAuth(au.UID)
 		if rt == nil || rt.Pool == nil {
 			log.Printf("comate 目录巡检：未找到运行时，跳过 uid=%s", au.UID)
 			continue
-		}
-		// 昵称补全（R136）：占位昵称换成「昵称（企业名）」。失败静默保持原样 ——
-		// 这只是展示层装饰，不该在启动日志里制造噪声。
-		if strings.HasPrefix(au.Nickname, comateNicknamePrefix) {
-			if nick, company, perr := comate.FetchProfile(au.AccessTokenValue()); perr == nil {
-				if disp := comate.DisplayName(nick, company); disp != "" {
-					au.Nickname = disp
-					if serr := au.SaveAtomic(); serr == nil {
-						renamed = true
-						log.Printf("comate 昵称已补全 uid=%s", au.UID)
-					}
-				}
-			}
 		}
 		// 已停用的账号不重复探测（用户手工停用的，尊重现状）。
 		if st, ok := rt.Pool.Status(au.UID); ok && st.Disabled {
@@ -1832,10 +1771,6 @@ func (a *App) SweepComateEmptyAccounts() {
 		}
 		rt.Pool.Disable(au.UID, "该账号没有可用模型（未开通 Comate），已自动停用")
 		log.Printf("comate 目录巡检：账号无可用模型，已自动停用（R135）uid=%s", au.UID)
-	}
-	if renamed {
-		// 昵称已落盘，重载一次让面板生效（否则要等下一次账号变更才刷新）。
-		a.reloadAccounts()
 	}
 }
 

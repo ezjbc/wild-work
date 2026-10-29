@@ -25,7 +25,7 @@
 //     或 200 + 一帧 **mock SSE**（`id:"chatcmpl-mock-…"`、`model:"mock"`，错误文案
 //     放在 delta.content、finish_reason=stop）—— 伪装成正常回答，必须识别并转成
 //     错误，否则客户端拿到「模型回了一句报错」的假成功。
-//  3. **响应 model 字段是短名**：请求 `673940726/zhipu/glm-5.3-flash//public`，
+//  3. **响应 model 字段是短名**：请求 `673940725/zhipu/glm-5.3-flash//public`，
 //     响应 `model:"glm-5.3-flash"`。聚合时回填客户端请求的原始模型名（R14 同款）。
 //  4. **reasoning_effort 直通**：`reasoning_effort:"off"` 实测生效（reasoning_content
 //     0 字符）；"none" 被接受但**静默忽略**（思考量不变）；low/medium/high 原样生效。

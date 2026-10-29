@@ -28,9 +28,6 @@ type Client struct {
 	IdleTimeout time.Duration
 	// Base 网关基址（默认 APIBase）；测试注入 httptest 假上游用，生产不设。
 	Base string
-	// Origin 主域（默认 OriginComate）：/token-usage、/api/coserve/v1/users/current
-	// 不在 llmproxy 前缀下，走这个域。测试注入 httptest 用。
-	Origin string
 
 	knownMu  sync.RWMutex
 	knownIDs map[string]string // 上游完整 ID → 展示名（目录缓存 + ChatStream 本地校验集）
@@ -69,14 +66,6 @@ func (c *Client) base() string {
 		return strings.TrimRight(c.Base, "/")
 	}
 	return defaultBaseURL
-}
-
-// originOf 主域（默认 OriginComate）。
-func (c *Client) originOf() string {
-	if c.Origin != "" {
-		return strings.TrimRight(c.Origin, "/")
-	}
-	return OriginComate
 }
 
 func (c *Client) idleTimeout() time.Duration {
@@ -120,14 +109,8 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 	// 本地校验：集合 == 暴露集 == /models items（构造即一致）；目录未拉到过时放行
 	//（fail-open，R42：校验过严会误拒上游新模型）。
-	//
-	// 状态码必须是 **400 而不是 404**：404 会被 Classify 归成 ErrNotFound，而这个错误是
-	// **本地**判定的请求错误（模型 id 不在我们已经拉到的目录里），上游一次都没碰。用 404
-	// 会让 handler 认为「这个号不行」去换号，换到另一个号照样被本地拒，每次轮换都记一笔账号
-	// 错误 ⇒ 实测两个号各记两笔后整条渠道进入冷却，正常请求也被拒（11:04 事故）。
-	// 400 走 badParams ⇒ ErrClient：不换号、不罚账号，直接把「模型 id 不对」告诉调用方。
 	if !c.knownModel(m) {
-		return nil, http.StatusBadRequest,
+		return nil, http.StatusNotFound,
 			[]byte(fmt.Sprintf(`{"error":{"message":"model not found in comate catalog: %s","code":"model_not_found"}}`, jsonEscape(m))), nil
 	}
 
@@ -391,15 +374,26 @@ func (c *Client) validateSID(sid string) (uid string, models int, err error) {
 // ExpiresAt 由 SubmitComateSID 置 FarFutureExpiry，NeedsRefresh 恒假。
 func (c *Client) RefreshToken(a *auth.Auth) error { return nil }
 
-// UserResource / UserResourceDetail 见 credits.go（R136）：
-// 额度真实端点是 /llmproxy/v1/user/token-usage（每日额度），
-// 早期「/credits /userinfo /me 全 404 ⇒ 恒 0」的结论已作废。
+// UserResource 恒 0 且**不得返回 error**：上游确无额度/余额端点
+// （/credits /userinfo /me 等候选实测全 404）。
+// 返回 error 会让面板与池逻辑报错，而"0"才是这里的正确事实。
+// 实际消耗由逐请求 usage.credits 记账（见包注释实测事实 5）。
+func (c *Client) UserResource(a *auth.Auth) (int64, error) { return 0, nil }
+
+// UserResourceDetail 同上：可消耗余额 0、无明细。
+func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
+	return 0, nil, nil
+}
 
 // DailyCheckin 无签到活动。调度器侧 CheckinHours 传 []int{}（R39），
 // 且 noExplicitCheckin 会挡掉面板手工签到，故本方法正常情况下不会被调用。
 func (c *Client) DailyCheckin(a *auth.Auth) error { return fmt.Errorf("comate 无签到活动") }
 
-// FetchModelPricing 见 models.go（R136）：倍率来自 /models 的 consume_ratio。
+// FetchModelPricing 上游无费率端点；单价只在逐请求 usage.credits 里，
+// 由 ledger 记账，不进费率表。返回空不报错（面板据此显示「不适用」）。
+func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
+	return nil, nil
+}
 
 // Classify 实现 provider.Upstream。
 func (c *Client) Classify(status int, body string) provider.ErrKind { return Classify(status, body) }
