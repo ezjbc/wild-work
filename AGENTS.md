@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R140）
+## 1. 决议项索引（R1–R141）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -172,6 +172,7 @@
 | R138 | **额度有两个池子：每日额度之外还有「免费额度」（试用包），只看 token-usage 会漏**（2026-10-29，用户指出「他应该有个 190 的剩余额度」驱动）：PSY 企业号 `daily_limit=null`、`periods` 全 `-1`，真实额度在 `GET /api/coserve/v1/billing/v3/credits/trial` 的 `trial_info`（`value=100000/consumed=9470` 是 scale=3 原始值，必须读 `precision`）；`UserResource` 每日为 0 时回退免费额度，明细独立成条不顶掉每日；真机：每日号 1673、PSY 191。回归 4 例。**已知限制**：模型目录仍单账号抽样，两租户的 9 个模型只显示一套。 |
 | R139 | **本地目录校验失败必须是「调用方参数错误」而不是「账号错误」：目录外模型 id 回 400（ErrClient），绝不回 404**（2026-10-29，真机自伤事故驱动）：`ChatStream` 的 `knownModel` 校验（模型 id 不在已拉到的 `/models` 目录里）原先回 `404 + model_not_found`，而 `Classify` 把 404 归成 `ErrNotFound`（`Rotatable()` 为真）⇒ handler 以为「这个账号不行」去换号，换到下一个号后**本地照样拒**，每次轮换都 `NoteError` 一笔账号错误 ⇒ 实测两个账号各记两笔后整条渠道进入冷却（`禁用 1 / 冷却 2`），连正常模型 id 的请求也一起被拒，而 `err_count` 还会被冷却逻辑清零，事后完全看不出是谁造成的。关键认识：这个错误**上游一次都没碰**（纯本地判定），本质是调用方传了不存在的模型 id，与账号健康度无关。修法：改回 `400`，走 `Classify` 的 `status >= 400 → ErrClient`；回归 `TestUnknownModelRejectedAsClientError`（假 `/models` 只给 A 租户模型，请求 B 租户 id，断言 status==400、无流、`Classify==ErrClient`）。**变异**：改回 404 ⇒ 该用例立刻变红。**已知限制**：这是对「单租户目录」的止血——两个租户（673940726 / 642757510）各有独立模型 id，网关只暴露被选中账号的那 9 个，另一租户的模型仍需「模型→账号」亲和路由才能用（R133 已知限制）。详见 `docs/决议项.md` R139 |
 | R140 | **模型能力声明取「上游声明 ∪ 可复现实测」**（2026-10-28，用户要求复测小浣熊识图能力）：真实 `image_url` A/B 对照（240×140 PNG data URI，无图对照先排除「按提示猜答案」）确认 8 个可识图模型；catalog 的 `vision` tag 漏标 `raccoon-19b265` / `raccoon-405a1c` ⇒ 由 `measuredVisionModels` 补齐，明确返回「当前纯文本模型不支持 image_url」的 `sn-glm-5-3` 必须移除静态表误标。`FetchModels` 的 `SupportsImages = hasTag(tags,"vision") || measuredVisionModels[id]`。**回归** `internal/raccoon/raccoon_test.go` 的 `TestMeasuredVisionCapabilities`（锁 8 个实测模型 + 排除 sn-glm-5-3 + 假 catalog 证明漏 tag 被补齐、纯文本不误标、带 vision tag 的新模型仍自动透出）。详见 `docs/决议项.md` R140 |
+| R141 | **新增内建渠道 WPS 灵犀（`lingxi/*`，第 23 条）；本地目录校验失败回 400 不回 404**（2026-10-30，合入 PR #198 并补修 404） | **协议要点**：凭据是浏览器 Cookie `wps_sid`（`Auth.AccessToken`，**Bearer 实测无效**）；对话是**两段式**——`POST /api/aigc/v3/assistant/sessions` 拿 `session_id`，再 `POST /api/aigc/v3/assistant/sessions/<id>/completions`，**每请求新建 session**（同 session 并发会回 error 帧，实测事实 2）；completions 必带三个专用头 `X-Cc-Version: 1` / `X-Client-Type: lingxi-web` / `X-Cc-Entrance: default`（缺一即拒）；SSE 双行分帧 `event:`+`data:`，`text` 帧是**增量**、`text_end`/`end` 收尾、完整序列 9 帧（`execution`/`user`/`text_start`/`text`×N/`text_end`/`aigc:end`/`recommend_start`/`recommend`/`recommend_end`/`finish`），推荐帧一律丢弃；`reasoning_effort` 线值 low→`"0"`、**medium 与 high 同档→`"1"`**（不丢档）、max→`"2"`；模型目录取 `GET /api/aioffice/v1/sessions/plans` 的 `data.models`（`multiplier` 写进模型名、`support_multimodal`→`SupportsImages`、`reasoning_efforts` 透传且**默认档 `[(len-1)/2]`**——2 档取低档省钱，旧 `[len/2]` 取高档）；签到 `GET /api/public/v1/tasks` 找 `task_key=="daily_check_in"`→`POST /api/public/v1/tasks/daily_check_in/claim?date=YYYY-MM-DD`（**日期在 query、无 body**）；余额 `GET /api/public/v1/credits/balance`（`total_balance` + `bonus_credits[].expire_time`）。**三条落地纪律**：① `uid` 必须带 `lxsid-` 前缀——与 comate 共用同一份 `wps_sid`、同一 sha256，不带前缀两渠道会生成同 uid，面板按 uid 定位账号时操作串到 comate（2026-10-29 真机验收发现）；② `Auth.ExpiresAt = FarFutureExpiry()`（+80 年，不变量 21，为 0 会让 `NeedsRefresh` 恒真反复刷新）；③ **本地目录校验（`knownModel`）失败回 400、不回 404**：404 被 `Classify` 归 `ErrNotFound`（`Rotatable()`）⇒ handler 换号并 `NoteError`，换到的号照样被本地拒 ⇒ 两号各记两笔后整渠道冷却（与 R139 comate 同款事故，2026-10-30 本轮修）。**接线**：`go lxSch.Run(sctx)`（R34）、`StreamHTTP` 不设总超时（R35）+ `NewIdleReader(90s)`、`provider.Transport` 表登记、`CreditRefreshInterval` 白名单、`runtimes`/调度器注册、`loginFlows[provider.Lingxi]`（CDP 捕获 或 面板粘贴 `sid`）；`RefreshToken` 空实现（Cookie 不轮换、无保活）、`FetchModelPricing` 返 `nil,nil`（无费率端点，倍率只写进模型名）、`creditsNAKind` **不含** lingxi（有真实余额端点）。**回归**：`internal/lingxi/lingxi_test.go` 19 例（Classify 优先级 / 两段式+三专用头 / 每请求新建 session / 9 帧聚合 / reasoning 帧 / 默认档位 2 档取低 / plans 目录与 401 / `ValidateSID` 的 `lxsid-` 前缀 / 签到已签·领到·无活动三态 / 余额 base+bonus 明细 / **`TestChatStreamUnknownModelIs400`**）、`internal/login_lingxi/login_test.go` 7 例。**变异**：把 400 改回 404 ⇒ `TestChatStreamUnknownModelIs400` 立刻变红（2026-10-30 已实测）。协议依据 `KevinFX-code/magpie-wps-lingxi`（MIT，只取协议知识）。**已知限制**：① 上游 `reasoning` 帧实测未复现（代码保守支持）；② 连签天数用 `claim 前 consecutive_days+1` 推算，claim 响应无权威字段，可能差 1；③ 面板提交手工 `sid` 与 CDP 自动捕获共用同一结论通道，`sid` 需含前缀剥离逻辑（整段 Cookie 头可直接粘）。详见 `docs/决议项.md` R141 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -454,7 +455,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R140 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R141 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |

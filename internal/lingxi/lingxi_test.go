@@ -162,13 +162,13 @@ func TestMapEffort(t *testing.T) {
 
 func TestChatStreamSendsSessionAndHeaders(t *testing.T) {
 	var (
-		gotSID          string
-		gotCcVersion    string
-		gotClientType   string
-		gotEntrance     string
-		gotCookie       string
-		gotPath         string
-		gotQuestion     string
+		gotSID        string
+		gotCcVersion  string
+		gotClientType string
+		gotEntrance   string
+		gotCookie     string
+		gotPath       string
+		gotQuestion   string
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -268,6 +268,35 @@ func TestChatStreamNewSessionPerRequest(t *testing.T) {
 	}
 	if sessionCreates != 2 {
 		t.Fatalf("session 创建次数 = %d, want 2（每请求新建）", sessionCreates)
+	}
+}
+
+// 本地目录拦截必须是 400（R141）：404 会被 Classify 归成 ErrNotFound，handler 遂换号 +
+// 记账号错误，换到的号照样被本地拒 ⇒ 两号各记两笔后整条渠道冷却。
+func TestChatStreamUnknownModelIs400(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("不该打上游：本地校验就应该拦下，path=%q", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.Base = srv.URL
+	c.knownIDs = map[string]string{"deepseek-v4.1-flash": "DeepSeek V4.1 Flash"} // 目录已拉到，非 fail-open
+
+	_, status, body, err := c.ChatStream(fakeAuth(), chatBody("ghost-model", []map[string]any{{"role": "user", "content": "问"}}))
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400（404 会换号+罚号，R141）", status)
+	}
+	if !strings.Contains(string(body), "model_not_found") || !strings.Contains(string(body), "ghost-model") {
+		t.Fatalf("body = %s，应含 model_not_found 与实际模型名", body)
+	}
+
+	// 护栏：目录里有它时必须放行（404 修成 400 不能把已知模型也拦了）。
+	if !c.knownModel("deepseek-v4.1-flash") {
+		t.Fatal("knownModel 应放行目录内模型")
 	}
 }
 
@@ -437,9 +466,9 @@ func TestFetchModelsUnauthorized(t *testing.T) {
 // 修复前 [len/2] 对两档取了高档，与注释矛盾且费智点。
 func TestFetchModelsDefaultEffort(t *testing.T) {
 	cases := []struct {
-		name     string
-		efforts  string
-		want     string
+		name    string
+		efforts string
+		want    string
 	}{
 		{"两档取低", `["low","high"]`, "low"},
 		{"三档取中", `["low","high","max"]`, "high"},

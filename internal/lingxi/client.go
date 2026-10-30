@@ -277,21 +277,26 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		return nil, http.StatusBadRequest, []byte(`{"error":{"message":"model is required"}}`), nil
 	}
 	// 本地校验（R42 fail-open：目录未拉到过时放行，误拦等于渠道周期性瘫痪）。
+	//
+	// 状态码必须是 **400 而不是 404**（R141，与 comate R139 同款）：404 会被 Classify
+	// 归成 ErrNotFound ⇒ handler 认为「这个号不行」去换号，换到另一个号照样被本地拒，
+	// 每次轮换都记一笔账号错误 ⇒ 两号各记两笔后整条渠道进冷却，正常请求也被拒。
+	// 400 走 badParams ⇒ ErrClient：不换号、不罚账号，直接把「模型 id 不对」告诉调用方。
 	if !c.knownModel(m) {
-		return nil, http.StatusNotFound,
+		return nil, http.StatusBadRequest,
 			[]byte(fmt.Sprintf(`{"error":{"message":"model not found in lingxi catalog: %s","code":"model_not_found"}}`, jsonEscape(m))), nil
 	}
 
 	out, err := buildChatRequest(body)
 	if err != nil {
-		return nil, http.StatusBadRequest, []byte(`{"error":{"message":"`+jsonEscape(err.Error())+`"}}`), nil
+		return nil, http.StatusBadRequest, []byte(`{"error":{"message":"` + jsonEscape(err.Error()) + `"}}`), nil
 	}
 	sid := sidOf(a)
 
 	// 每请求新建会话（实测事实 2）。
 	sessionID, err := c.createSession(sid)
 	if err != nil {
-		return nil, http.StatusBadGateway, []byte(`{"error":{"message":"`+jsonEscape(err.Error())+`"}}`), nil
+		return nil, http.StatusBadGateway, []byte(`{"error":{"message":"` + jsonEscape(err.Error()) + `"}}`), nil
 	}
 
 	req, err := http.NewRequest(http.MethodPost, c.base()+EpCompletions(sessionID), bytes.NewReader(out))

@@ -3845,3 +3845,104 @@ WPS 网页版的模型代理（`comate.wps.cn`），模型面覆盖 GLM / DeepSe
 | [@jswh](https://github.com/jswh) | PR #193：模型降级链别名（R129） |
 | [@wzwjustdoit](https://github.com/wzwjustdoit) | PR #191：粘性路由轮换阈值可配（R127） |
 | [@ezjbc](https://github.com/ezjbc) | PR #194：Loomy 短信发码按响应证据判成败（R128） |
+
+
+# wild-work v2.11.0
+
+本版新增 **WPS 灵犀内建渠道**（第 23 条，R141）——与 Comate 共用同一份 `wps_sid` 但走**两段式**对话
+（先建 session 再 completions）、智点余额与每日签到都接通；同时把 **Comate** 从「查不到额度」补成
+真实额度/倍率/昵称（R135–R139，含扫码 CSRF+PKCE 与免费额度池）、修好**小浣熊 8 个模型的识图能力**
+（R140），并把 **DSH 指纹脱敏**从「能过」做到「覆盖所有已知句式」（R134）。
+
+对应决议 **R134 / R135 / R136 / R137 / R138 / R139 / R140 / R141**。
+
+> ⚠️ **自动更新仍不在本版**。PR #188 的更新引擎留在 `feat/auto-update` 分支，主线不含任何
+> 自替换二进制的代码；相关工作会在后续版本的架构重构里一并重做（签名校验、重启器与启动期自愈、
+> 预发布过滤、断点续传与空闲看门狗）。
+
+## 🆕 新渠道：WPS 灵犀（`lingxi/*`，R141）
+
+WPS 的 AI 办公助手（`lingxi.kdocs.cn`），**第 23 条内建渠道**。凭据与 Comate **共用同一份**
+浏览器 Cookie `wps_sid`（Bearer 实测无效），但两者是独立产品线：灵犀的额度叫「智点」。
+
+- **登录**：面板「＋ WPS 灵犀」→ 粘贴整段 Cookie 头即可（`wps_sid=…` 会被自动剥前缀；
+  裸值也能直接用），也支持本机浏览器 CDP 自动捕获。**`sid` 被校验通过（拉通 `plans`）才算加号成功**。
+  uid 带 `lxsid-` 前缀，与 Comate 账号互不串号。
+- **对话协议是两段式**：先 `POST /api/aigc/v3/assistant/sessions` 拿会话，再打
+  `…/sessions/<id>/completions`；**每个请求都新建会话**（同会话并发会被上游用 error 帧拒掉），
+  completions 还必须带三个专用头 `X-Cc-Version: 1` / `X-Client-Type: lingxi-web` / `X-Cc-Entrance: default`。
+- **多轮历史压成单串**：灵犀的 `question` 只有一个字段，故历史被拼成
+  `[System: …]` / `User: …` / `Assistant: …` 段落（最后一条 user 之后的消息丢弃），`max_tokens` 不透传。
+- **思考档位**：low→`"0"`、medium 与 high→`"1"`（上游只三档，拆分必丢档）、max→`"2"`、off/none→不发。
+  **默认档取「中间那档」**（2 档取低档，避免默认就「费智点」）。
+- **签到 + 余额**：每日签到 `POST /api/public/v1/tasks/daily_check_in/claim?date=YYYY-MM-DD`（日期在 query）；
+  余额 `GET /api/public/v1/credits/balance` → 基础智点 + 各赠送包（带各自到期日，面板按自然日分桶）。
+  面板结果如实分「领到 / 已领 / 还没发 / 失败」四档，不一律写「签到成功」。
+- **已知限制**：`reasoning` 帧实测未出现（即使 `effort="2"`）；连签天数按「领取前 +1」推算，可能差 1；
+  `plans` 的套餐权益不解析；无 `RefreshToken`/无保活，`sid` 失效只能重贴或重扫码。
+
+协议依据：[@KevinFX-code/magpie-wps-lingxi](https://github.com/KevinFX-code/magpie-wps-lingxi)（MIT，只取协议知识）。
+
+## 🛠️ Comate 五项修复（R135–R139）
+
+- **R135 「没有模型的账号」不进路由池**：个人号 `/models` 回 `code:0` + `items:[]`，加进来会让整条
+  渠道 100% 撞 mock 帧（账号还显示健康）。现在**加号即拦**（落盘后立刻 `Pool.Disable` 并把原因写进
+  面板警告），启动时还会异步巡检存量账号；账号卡片新增「已停用 · 原因」徽标，可手工启用。
+- **R136 真实额度与倍率**：R130 判「上游无余额端点」是**端点名猜错** —— 真实端点
+  `GET /llmproxy/v1/user/token-usage`（每日 `limit/remain/used`）+ `GET /api/coserve/v1/users/current`
+  （昵称/企业名）+ `/models` 的 `consume_ratio`（倍率）。面板不再显示「不适用」，昵称变成「昵称（企业名）」。
+  上游 `-1` = 该周期**没有额度**（不是用光），不会显示成 0。
+- **R137 扫码能确认却换不出 `wps_sid`**：缺的是 WPS 账号域的 **CSRF 双提交**（`csrf` Cookie + `X-CSRFToken`
+  头），旧实现还把上游响应体丢了、把「没走到校验」误读成「上游不肯发」；同批补上 **PKCE（S256）**，
+  失败时逐条回传上游原文。另修好「已扫码还会 110 秒换新码」导致面板卡在「已扫码，请确认」。
+- **R138 双额度池**：每日额度之外还有**免费额度（试用包）**（`/api/coserve/v1/billing/v3/credits/trial`
+  的 `trial_info`，`value/consumed` 是 scale=3 原始值，必须读 `precision`）。每日为 0 时回退免费额度，
+  明细里两者并列不顶掉。
+- **R139 目录外模型 id 回 400 而不是 404**：404 被归成「账号错误」⇒ 换号 + 记错误 ⇒ 两号各两笔后
+  **整条渠道冷却**（真机自伤事故）。这是纯本地判定、上游一次都没碰，改回 400 后「不换号、不罚号、
+  直接告诉调用方」。**本版把同一坑在灵犀渠道一并堵上**（R141）。
+
+## 👁️ 小浣熊识图能力按实测校正（R140）
+
+`/v1/models` 曾把 `raccoon-19b265`、`raccoon-405a1c` 标成纯文本，静态兜底表反过来把 `sn-glm-5-3` 标成可识图。
+本版用**真实链路 A/B 实测**（240×140 PNG data URI，无图对照先排除「按提示猜答案」）确认 **8 个可识图模型**，
+`sn-glm-5-3` 明确回「当前纯文本模型不支持 `image_url`」故移除误标。
+`SupportsImages` 改为 **上游 `vision` tag ∪ 实测表**，上游漏标也不会再让客户端隐藏上传入口。
+
+## 🎭 DSH 指纹脱敏补全（R134）
+
+预检表改为**全小写 + 自写零分配折叠匹配**（不用 `strings.ToLower`），并补上此前漏掉的三条句式：
+
+- **DSH 身份句**：用正则容忍 `the` / 空格与连字符 / 大小写差异，命中后**整句替换**成中性的
+  「官方 CLI 工具」表述，让品牌串从 `system` 里彻底消失（而不是只改其中一个词）。
+- **`@` 引用约定段**：只改后半句（`Relative paths` → `The relative paths`）；前半句单独出现**不是**指纹，
+  改了反而制造新指纹。
+- **`11-128` 错误码**：改写串用 **U+2011 非断行连字符** —— ASCII 同形会让「改前 == 改后」空转。
+- 新增**整包兜底** `sanitize.BodyFallback`（仅命中才重编码，接在两区 `PrepareBody` 的 `sanitize.Messages` **之后**）
+  与**拦截诊断**：被内容审核拦下时把 `system` 开头若干字符落 `data/blocked/`（滚动留 3 份）并打 `[diag]`
+  日志，配套 `scripts/bisect-blocked.py` 做分层重放二分（默认封顶 24 次请求，守 §0.1 的最小上游请求纪律）。
+
+## 🔧 修正
+
+- 内置渠道配色新增 `--ch-lingxi`，23 个渠道两两不同色（最小 ΔE2000 6.1，灵犀 vs QoderCOM）。
+- `dist/wild-work.exe` 已本地重建（CI 只产出带平台后缀的产物）。
+
+## 📚 文档
+
+- `AGENTS.md` / `docs/决议项.md` 新增 R134–R141；渠道清单与口径从 22 条同步到 **23 条内建**（可添加 22 条）。
+- `docs/渠道接入备忘.md` 新增灵犀章节（两段式对话、三专用头、SSE 9 帧、签到与余额端点、`lxsid-` uid 前缀）。
+- `docs/接口参考.md` 增补 `POST /api/login/lingxi_sid`。
+- `README.md` 致谢表新增 `magpie-wps-lingxi`。
+
+## 🙏 致谢
+
+本版包含 4 个社区贡献（均已合入 master 并保留作者署名）：
+
+| 贡献者 | 内容 |
+|--------|------|
+| [@happyshushushu](https://github.com/happyshushushu) | PR #200：DSH 指纹脱敏补全（R134）；PR #197：小浣熊识图能力实测校正（R140）；PR #199：Comate 额度/空目录账号隔离/扫码 CSRF+PKCE/免费额度池（R135–R139） |
+| [@ezjbc](https://github.com/ezjbc) | PR #198：WPS 灵犀内建渠道（R141） |
+
+以及 [@C3H3-AI](https://github.com/C3H3-AI) 的 PR #196（DSH `@` 引用约定段脱敏）——其结论已被
+PR #200 的完整重写覆盖（且两者对「前半句该不该改」的判断相反，以真机 A/B 为准），本版不重复合入，
+仍致谢其先行定位。
