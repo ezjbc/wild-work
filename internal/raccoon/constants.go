@@ -64,7 +64,7 @@ const ClientAliasModel = "raccoon-chat-ml-5-5"
 // staticModels 静态兜底模型表（模型目录接口不可用时）。
 // 数据来源：2026-09-22 实测 GET /model_catalog。
 // SupportsTools/SupportsImages/SupportsReasoning 优先取上游 tags；其中图片能力另有
-// 2026-10-28 实测兜底（见 measuredVisionModels / R134）。
+// 2026-10-28 实测兜底（见 measuredVisionModels / R140）。
 // measuredVisionModels 是 2026-10-28 通过 wild-work → 小浣熊真实链路逐个实测
 // 确认能消费 OpenAI image_url（data:image/png;base64）并正确识别图像的模型。
 //
@@ -73,7 +73,7 @@ const ClientAliasModel = "raccoon-chat-ml-5-5"
 // `当前纯文本模型不支持 image_url`，故刻意不在此表。
 //
 // 上游 catalog 的 vision tag 曾漏标 raccoon-19b265 / raccoon-405a1c，若只信 tag，
-// /v1/models 会把实测可识图的模型错误声明为 text-only（R134）。
+// /v1/models 会把实测可识图的模型错误声明为 text-only（R140）。
 var measuredVisionModels = map[string]bool{
 	"raccoon-8c4485":              true,
 	"raccoon-19b265":              true,

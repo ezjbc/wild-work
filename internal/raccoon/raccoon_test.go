@@ -122,7 +122,7 @@ func TestKnownModelAcceptsLiveCatalog(t *testing.T) {
 	}
 }
 
-// TestMeasuredVisionCapabilities 回归 R134：上游 catalog 的 vision tag 不是完整真值，
+// TestMeasuredVisionCapabilities 回归 R140：上游 catalog 的 vision tag 不是完整真值，
 // 动态目录必须把实测能力与 tag 取并集；明确拒绝 image_url 的纯文本 GLM-5.3 不得误标。
 func TestMeasuredVisionCapabilities(t *testing.T) {
 	vision := []string{
