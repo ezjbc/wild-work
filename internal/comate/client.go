@@ -28,6 +28,9 @@ type Client struct {
 	IdleTimeout time.Duration
 	// Base 网关基址（默认 APIBase）；测试注入 httptest 假上游用，生产不设。
 	Base string
+	// Origin 主域（默认 OriginComate）：/token-usage、/api/coserve/v1/users/current
+	// 不在 llmproxy 前缀下，走这个域。测试注入 httptest 用。
+	Origin string
 
 	knownMu  sync.RWMutex
 	knownIDs map[string]string // 上游完整 ID → 展示名（目录缓存 + ChatStream 本地校验集）
@@ -66,6 +69,14 @@ func (c *Client) base() string {
 		return strings.TrimRight(c.Base, "/")
 	}
 	return defaultBaseURL
+}
+
+// originOf 主域（默认 OriginComate）。
+func (c *Client) originOf() string {
+	if c.Origin != "" {
+		return strings.TrimRight(c.Origin, "/")
+	}
+	return OriginComate
 }
 
 func (c *Client) idleTimeout() time.Duration {
@@ -109,8 +120,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 	// 本地校验：集合 == 暴露集 == /models items（构造即一致）；目录未拉到过时放行
 	//（fail-open，R42：校验过严会误拒上游新模型）。
+	//
+	// 状态码必须是 **400 而不是 404**：404 会被 Classify 归成 ErrNotFound，而这个错误是
+	// **本地**判定的请求错误（模型 id 不在我们已经拉到的目录里），上游一次都没碰。用 404
+	// 会让 handler 认为「这个号不行」去换号，换到另一个号照样被本地拒，每次轮换都记一笔账号
+	// 错误 ⇒ 实测两个号各记两笔后整条渠道进入冷却，正常请求也被拒（11:04 事故）。
+	// 400 走 badParams ⇒ ErrClient：不换号、不罚账号，直接把「模型 id 不对」告诉调用方。
 	if !c.knownModel(m) {
-		return nil, http.StatusNotFound,
+		return nil, http.StatusBadRequest,
 			[]byte(fmt.Sprintf(`{"error":{"message":"model not found in comate catalog: %s","code":"model_not_found"}}`, jsonEscape(m))), nil
 	}
 
@@ -311,42 +328,57 @@ func NormalizeSID(raw string) string {
 func ValidateSID(raw string) (uid string, err error) {
 	sid := NormalizeSID(raw)
 	cli := New()
+	uid, _, err = cli.validateSID(sid)
+	return uid, err
+}
+
+// ValidateSIDWithModels 校验凭据并返回该账号当前的模型数量。
+//
+// `/models` 是**账号维度**目录：`code:0` 且 `items:[]` 表示这个 WPS 账号在 Comate 侧
+// 一个模型都没有（实测个人号：「注册了 Comate」但没有分配任何模型），并非凭据失效。
+// 调用方据此决定要不要把账号放进路由池。
+func ValidateSIDWithModels(raw string) (uid string, models int, err error) {
+	sid := NormalizeSID(raw)
+	cli := New()
 	return cli.validateSID(sid)
 }
 
 // validateSID 是 ValidateSID 的可注入版本（测试用 httptest 假上游替换 Base）。
-func (c *Client) validateSID(sid string) (uid string, err error) {
+func (c *Client) validateSID(sid string) (uid string, models int, err error) {
 	sid = strings.TrimSpace(sid)
 	if sid == "" {
-		return "", fmt.Errorf("wps_sid 不能为空")
+		return "", 0, fmt.Errorf("wps_sid 不能为空")
 	}
 	req, err := http.NewRequest(http.MethodGet, c.base()+EpModels, nil)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	applyHeaders(req, sid)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 128<<10))
 	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
 		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("校验 wps_sid 失败 HTTP %d：%s", resp.StatusCode, truncate(strings.TrimSpace(string(raw)), 256))
+			return "", 0, fmt.Errorf("校验 wps_sid 失败 HTTP %d：%s", resp.StatusCode, truncate(strings.TrimSpace(string(raw)), 256))
 		}
 		// 200：再验信封 code==0（上游业务错误也可能压平成 200，见包注释实测事实 2）。
 		var env struct {
 			Code int    `json:"code"`
 			Msg  string `json:"msg"`
+			Data struct {
+				Items []json.RawMessage `json:"items"`
+			} `json:"data"`
 		}
 		if json.Unmarshal(raw, &env) == nil && env.Code != 0 {
-			return "", fmt.Errorf("wps_sid 无效：%s", env.Msg)
+			return "", 0, fmt.Errorf("wps_sid 无效：%s", env.Msg)
 		}
 		sum := sha256Sum(sid)
-		return "sid-" + sum[:16], nil
+		return "sid-" + sum[:16], len(env.Data.Items), nil
 	}
-	return "", fmt.Errorf("wps_sid 无效或已过期（HTTP %d）：请重新从浏览器复制", resp.StatusCode)
+	return "", 0, fmt.Errorf("wps_sid 无效或已过期（HTTP %d）：请重新从浏览器复制", resp.StatusCode)
 }
 
 // ---------------------------------------------------------------------------
@@ -359,26 +391,15 @@ func (c *Client) validateSID(sid string) (uid string, err error) {
 // ExpiresAt 由 SubmitComateSID 置 FarFutureExpiry，NeedsRefresh 恒假。
 func (c *Client) RefreshToken(a *auth.Auth) error { return nil }
 
-// UserResource 恒 0 且**不得返回 error**：上游确无额度/余额端点
-// （/credits /userinfo /me 等候选实测全 404）。
-// 返回 error 会让面板与池逻辑报错，而"0"才是这里的正确事实。
-// 实际消耗由逐请求 usage.credits 记账（见包注释实测事实 5）。
-func (c *Client) UserResource(a *auth.Auth) (int64, error) { return 0, nil }
-
-// UserResourceDetail 同上：可消耗余额 0、无明细。
-func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
-	return 0, nil, nil
-}
+// UserResource / UserResourceDetail 见 credits.go（R136）：
+// 额度真实端点是 /llmproxy/v1/user/token-usage（每日额度），
+// 早期「/credits /userinfo /me 全 404 ⇒ 恒 0」的结论已作废。
 
 // DailyCheckin 无签到活动。调度器侧 CheckinHours 传 []int{}（R39），
 // 且 noExplicitCheckin 会挡掉面板手工签到，故本方法正常情况下不会被调用。
 func (c *Client) DailyCheckin(a *auth.Auth) error { return fmt.Errorf("comate 无签到活动") }
 
-// FetchModelPricing 上游无费率端点；单价只在逐请求 usage.credits 里，
-// 由 ledger 记账，不进费率表。返回空不报错（面板据此显示「不适用」）。
-func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
-	return nil, nil
-}
+// FetchModelPricing 见 models.go（R136）：倍率来自 /models 的 consume_ratio。
 
 // Classify 实现 provider.Upstream。
 func (c *Client) Classify(status int, body string) provider.ErrKind { return Classify(status, body) }
