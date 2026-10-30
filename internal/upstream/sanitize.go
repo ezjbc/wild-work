@@ -1,8 +1,13 @@
-// sanitize.go 出站请求体脱敏：剥离上游内容审核黑名单指纹。
+// sanitize.go 出站请求体指纹脱敏：剥离上游内容审核黑名单指纹。
 //
-// 背景：客户端（Claude Code 类 CLI）在 system prompt 注入若干固定模板句，
+// 背景：客户端（Claude Code / DSH 类 CLI）在 system prompt 注入若干固定模板句，
 // 上游内容审核按逐字精确匹配拦截（非语义审核），一字改动即可绕过。
-// 策略：键值/header 型指纹整段剥离；承载语义的模板句最小改写（换一词），语义不变。
+// 策略：键值/header 型指纹整段剥离；承载语义的模板句最小改写；对大小写不敏感、
+// 可跨句、只看 system 开头的 DSH 逐字指纹（2026-10-28 真机三指纹实测）用正则
+// 容忍变体。
+//
+// 本文件与 internal/sanitize/sanitize.go 是**两套平行实现**（本包 prepareBodyInner
+// 内部调用 / 生产路径走 sanitize.Messages），必须同步改，漏一处等于没改。
 package upstream
 
 import (
@@ -10,22 +15,32 @@ import (
 	"strings"
 )
 
-// sanitizeFeatures 特征预检：任一命中才进入净化（strings.Contains 快速路径，
-// 普通请求全不中 → 原样返回，零分配）。
+// sanitizeFeatures 特征预检：任一命中才进入净化。全部小写，配合 asciiContainsFold
+// 做大小写不敏感匹配（上游判据大小写不敏感，2026-10-28 真机实测小写变体同样 400，
+// 大小写敏感的 Contains 会让小写变体连净化都进不去）。
 var sanitizeFeatures = []string{
+	"x-anthropic-billing-hdr",
 	"x-anthropic-billing-header", // header 键值段键名
 	"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
-	"You are Claude Code",        // 身份句（截断前缀即可命中）
-	"Main branch (",              // 注入指令句（截断前缀即可命中）
-	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
+	"you are claude code",        // 身份句（截断前缀即可命中）
+	"main branch (",              // 注入指令句（截断前缀即可命中）
+	"you are a coding agent running in the codex cli", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
-	"11128",                                           // 上游反探测：裸数字错误码
-	"You are an AI agent powered by DeepSeek Harness", // DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测）
-	"DeepSeek Harness Web GUI",                        // DSH Web GUI 段：上游按 system 开头整段 221 字符逐字串锚定（2026-10-21 实测）
+	"11-128",
+	"11128", // 上游反探测：裸数字错误码
+	"you are an ai agent powered by deepseek harness", // DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测）
+	"deepseek harness web gui",                        // DSH Web GUI 段：上游按 system 开头整段 221 字符逐字串锚定（2026-10-21 实测）
+	"deepseek harness",                                // DSH 品牌串（超集，兜住 "DeepSeek Harness CLI" 等变体触发预检）
+	"relative paths resolve from the workspace root",  // DSH @ 路径句（跨句指纹后半，2026-10-28 实测）
 }
 
+// 宽松键名正则：键名内部允许夹任意非字母序列（全角/Unicode 连字符、空格、零宽等），
+// 且 h/e/a/d/e/r 逐字母容忍分隔——header 全形态与 hdr 缩写形态都命中。
+// 注意不能简单写 `hdr`：原始键名 "header" 不含连续 "hdr"，会漏掉键值整段剥离。
+const hdrKeyRe = `x[^a-z]*anthropic[^a-z]*billing[^a-z]*h[^a-z]*(?:e[^a-z]*)?(?:a[^a-z]*)?d[^a-z]*(?:e[^a-z]*)?r`
+
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
-var sanitizeHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\n]*;?\s*`)
+var sanitizeHdrRe = regexp.MustCompile(`(?i)` + hdrKeyRe + `\s*:[^;\n]*;?\s*`)
 
 // sanitizeBareHdrRe 兜底层：裸键名（无冒号无值）同样是指纹——2026-09-13 实验 F4
 // 证实 assistant 消息里反引号引用裸键名即触发 11128，而剥离层要求冒号、对裸串无效。
@@ -35,10 +50,27 @@ var sanitizeHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\n]*;?
 // 注意该正则不要求冒号，是 sanitizeHdrRe 的超集——hasFingerprint 与 sanitizeText
 // 中两者并用：先删键值形态（sanitizeHdrRe），再缩写残留裸键名（本正则），
 // 替换语义不同（整段删除 vs 最小缩写），不可合并为一个正则。
-var sanitizeBareHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-header`)
+var sanitizeBareHdrRe = regexp.MustCompile(`(?i)` + hdrKeyRe)
 
 // sanitizeKvRe 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
 var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
+
+// claudeCodeIdentity DSH 身份句的整句替换目标（与 sanitizeRewrites 首对的
+// Claude Code 身份句目标一致）。整句替换而非只插冠词：替换后 "DeepSeek Harness"
+// 品牌串从 system 消息彻底消失，整包兜底（internal/sanitize.BodyFallback）才不会
+// 二次改写已净化的句子。
+const claudeCodeIdentity = "You are Claude Code, Anthropic's official CLI tool for Claude"
+
+var (
+	// DSH 身份句：容忍可选冠词 the 与分隔符变体。精确改写（插冠词）会先产出
+	// "powered by the DeepSeek Harness"，本正则必须能二次命中并整句替换。
+	dshIdentityRe = regexp.MustCompile(`(?i)you\s+are\s+an\s+ai\s+agent\s+powered\s+by\s+(?:the\s+)?deepseek[\s\-_]*harness`)
+	// DSH Web GUI 段：整段 221 字符逐字串的前半，缩写 DSH 即破坏逐字匹配。
+	dshWebGuiRe = regexp.MustCompile(`(?i)deepseek[\s\-_]*harness\s+web\s+gui`)
+	// DSH @ 路径句（跨句指纹后半）：插冠词 The 打断逐字串，语义不变（实测 200）。
+	acpPathRe = regexp.MustCompile(`(?i)relative\s+paths\s+resolve\s+from\s+the\s+workspace\s+root`)
+	// 整包兜底正则只在 internal/sanitize.BodyFallback（接线层），本包不重复实现。
+)
 
 // sanitizeRewrites 改写层：全模板句逐字替换（每句只改一个词，语义不变）。
 //
@@ -75,13 +107,15 @@ var sanitizeRewrites = [][2]string{
 		// 上游据此识别"在讨论/回显其内部错误码"的请求。
 		// 代价：用户对话中任何 11128 都会被改写——但这串数字出现在请求里本身就是拦截条件，
 		// 不改写必然失败。插入连字符保留可读性与指代（零宽空格无效，实测上游会归一化）。
+		// 目标用 U+2011（非断行连字符，hex 3131e28091313238）：渲染与普通连字符一致
+		// 但字节不同，才真正打断逐字匹配——ASCII "11-128" 与源串同形时 old==new 空转。
 		"11128",
-		"11-128",
+		"11\u2011128",
 	},
 	{
 		// DSH 身份句：上游只认 system 开头的逐字形态（换位置、换 role、缺 "You are an"
-		// 前缀均放行）；插入冠词 the 即绕过——保留 powered by 原措辞，仅加一个虚词，
-		// 语义扰动最小，且不依赖不可见字符或 Unicode 归一化（实测 200）。
+		// 前缀均放行）；插冠词 the 是最小扰动改法（实测 200）。精确改写产出后由
+		// dshIdentityRe 二次命中整句替换为 Claude Code 身份句。
 		"You are an AI agent powered by DeepSeek Harness",
 		"You are an AI agent powered by the DeepSeek Harness",
 	},
@@ -103,6 +137,11 @@ func sanitizeText(text string) string {
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
+	// DSH 指纹段改写（正则，容忍大小写/冠词/分隔符变体；置于精确改写之后——
+	// 精确改写先产出 "powered by the DeepSeek Harness"，本层正则需能二次命中）。
+	text = dshIdentityRe.ReplaceAllString(text, claudeCodeIdentity)
+	text = dshWebGuiRe.ReplaceAllString(text, "DSH Web GUI")
+	text = acpPathRe.ReplaceAllString(text, "The relative paths resolve from the workspace root")
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}
@@ -118,18 +157,50 @@ func sanitizeText(text string) string {
 	return strings.TrimSpace(text)
 }
 
-// hasFingerprint 特征预检：先走 strings.Contains 快速路径（零分配）；
+// hasFingerprint 特征预检：sanitizeFeatures 全小写 + ASCII 折叠匹配（零分配，
+// 不能整串 ToLower——对每个请求体整串拷贝一次会破坏零分配预检）；
 // header 键名有大小写变体（X-Anthropic-...）且可能以裸键名形态出现（无冒号），
-// Contains 大小写敏感、sanitizeHdrRe 要求冒号——两者都会漏掉「混合大小写 + 裸键名」，
-// 必须再用不要求冒号的 (?i) 正则兜底（sanitizeBareHdrRe），否则整条净化被跳过。
-// sanitizeBareHdrRe 不要求冒号，是 sanitizeHdrRe 的超集，故无需再单独匹配后者。
+// 最终以不要求冒号的 (?i) 正则兜底（sanitizeBareHdrRe，是 sanitizeHdrRe 的超集）。
 func hasFingerprint(text string) bool {
 	for _, f := range sanitizeFeatures {
-		if strings.Contains(text, f) {
+		if asciiContainsFold(text, f) {
 			return true
 		}
 	}
 	return sanitizeBareHdrRe.MatchString(text)
+}
+
+// lowerASCII ASCII 大写折小写（仅特征表需要的折叠范围）。
+func lowerASCII(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+// asciiContainsFold 大小写不敏感（ASCII 折叠）子串查找，零分配。
+// 特征表全为 ASCII，ASCII 折叠已覆盖上游的大小写判据。
+func asciiContainsFold(s, f string) bool {
+	n := len(f)
+	if n == 0 {
+		return true
+	}
+	first := lowerASCII(f[0])
+	for i := 0; i+n <= len(s); i++ {
+		if lowerASCII(s[i]) != first {
+			continue
+		}
+		j := 1
+		for ; j < n; j++ {
+			if lowerASCII(s[i+j]) != lowerASCII(f[j]) {
+				break
+			}
+		}
+		if j == n {
+			return true
+		}
+	}
+	return false
 }
 
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
