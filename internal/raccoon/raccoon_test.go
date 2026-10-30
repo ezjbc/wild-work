@@ -122,6 +122,53 @@ func TestKnownModelAcceptsLiveCatalog(t *testing.T) {
 	}
 }
 
+// TestMeasuredVisionCapabilities 回归 R134：上游 catalog 的 vision tag 不是完整真值，
+// 动态目录必须把实测能力与 tag 取并集；明确拒绝 image_url 的纯文本 GLM-5.3 不得误标。
+func TestMeasuredVisionCapabilities(t *testing.T) {
+	vision := []string{
+		"raccoon-8c4485", "raccoon-19b265", "raccoon-405a1c",
+		"sn-sensenova-6-8-flash", "sn-sensenova-6-8-flash-lite",
+		"sn-kimi-k3", "sn-glm-5-3-flash", "sn-deepseek-v4-1-flash-1017",
+	}
+	for _, id := range vision {
+		if !measuredVisionModels[id] {
+			t.Errorf("实测可识图模型 %q 未登记", id)
+		}
+	}
+	if measuredVisionModels["sn-glm-5-3"] {
+		t.Fatal("sn-glm-5-3 实测明确拒绝 image_url，不得标为可识图")
+	}
+
+	// 假目录故意不给 19b265 vision tag：FetchModels 仍应从实测表补齐能力。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":0,"data":{"categories":[{"models":[
+			{"model_name":"raccoon-19b265","tags":[],"params":{"context_window":1000}},
+			{"model_name":"sn-glm-5-3","tags":["reasoning"],"params":{"context_window":1000}},
+			{"model_name":"future-vision","tags":["vision"],"params":{"context_window":1000}}
+		]}]}}`))
+	}))
+	defer srv.Close()
+	c := New()
+	c.Base = srv.URL
+	got, err := c.FetchModels(&auth.Auth{AccessToken: "dummy"})
+	if err != nil {
+		t.Fatalf("FetchModels: %v", err)
+	}
+	byID := make(map[string]provider.ModelInfo, len(got))
+	for _, m := range got {
+		byID[m.ID] = m
+	}
+	if !byID["raccoon-19b265"].SupportsImages {
+		t.Error("漏 tag 的实测模型应补 SupportsImages=true")
+	}
+	if byID["sn-glm-5-3"].SupportsImages {
+		t.Error("纯文本模型 sn-glm-5-3 不应误标图片能力")
+	}
+	if !byID["future-vision"].SupportsImages {
+		t.Error("上游明确带 vision tag 的新模型仍应声明图片能力")
+	}
+}
+
 func TestStaticModelsNonEmpty(t *testing.T) {
 	ms := StaticModels()
 	if len(ms) != len(staticModels) {

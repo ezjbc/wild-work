@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R134）
+## 1. 决议项索引（R1–R140）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -166,6 +166,7 @@
 | R132 | **无桌面部署（NAS/docker）的登录必须服务端闭环：扫码优先、本机浏览器接管次之、手工粘贴兜底**（2026-10-28，用户「这台其实是一个 linux 系统你再看一下有办法吗」驱动）：CDP 拉起的是**运行 wild-work 那台机器**的浏览器，而 `wps_sid` 是 `wps.cn` 域下的 Cookie，同源策略让面板读不到用户本机浏览器里的它 ⇒ NAS 永远弹不出窗口。**取证**：`account.wps.cn/login` 的登录页 JS 声明 `QR:"https://qr.wps.cn"`；实测 `GET qr.wps.cn/api/v3/login_qrcode` 出 `loginid`、`/login_qrcode/url` 出 PNG 二维码（解出来是 `account.wps.cn/qr/<loginid>`）、`/login_qrcode/login?state=scan` 长轮询出 `pending→scan→logined`，`logined` 帧带 `authcode`/`kso_authcode`，登录页随后用 `api/session/exchange/login` 或 `passport/secure/api/grant_token` 换 session Cookie ⇒ **扫码可全程在服务端 HTTP 完成，无需桌面/浏览器**。修法三条路：① `internal/login_comate/qr.go` `QRSession`：申请 loginid+二维码 → 面板 `<img>` 就地显示 → 45s 长轮询，`scan` 后切 `state=confirm`，`logined` 换 Cookie 捞 `wps_sid` → 走**同一条** `SubmitComateSID`；二维码 110s 自动换新、整体 5min 超时。② `internal/login_comate/browser.go` + `internal/cdp.Attach`：配置 `login.comate_browser_cdp` 接管**已在跑**的浏览器（`Storage.getCookies` 读 `wps_sid`），在用户熟悉且已登录的 Chrome/Edge 里开登录页，不新开窗口、不用临时 profile，会话结束只解引用不关用户的浏览器。③ 手工粘贴保留（`NormalizeSID` 吃得下整段 Cookie 头）。前端 comate 弹层三段式（`#comateQr` 出图+状态文案 / `#comateBrowser` 可用才显示 / `#comateManual` 默认收起），扫码与浏览器复用参数化 `startComatePoll(path, statusPath)`。**回归**：`internal/cdp/attach_test.go`、`scripts/ui-static-check.mjs` 场景 1.8（三条路径断言）。**已知限制**：扫码换凭据依赖 WPS 网页版内部接口，协议变即失效→回落手工粘贴；本机浏览器要求 `--remote-debugging-port` 启动（Chrome 136+ 默认 profile 拒开调试口）。详见 `docs/决议项.md` R132 |
 | R133 | **模型目录是渠道维度的：单个账号抽样失败不得让整条渠道模型面归零，拉不到目录要换号重试**（2026-10-28，实测「加第二个 WPS 账号后 comate 9→0」驱动）：`fetchRuntimeModels` 原先 `rt.Pool.Pick()` 只抽**一个**账号拉 `/models`；comate 对「200 但 `items=[]`」（未开通/额度 0）的号返回错误 ⇒ 抽中坏号的那一刻等于宣布整渠道没模型，还写 5min 负缓存。修法：`tried` + `PickExcluding` 有界换号（`maxModelsFetchAccounts=3`），成功才写缓存、每次失败逐条留痕，全失败才写 `lastFail` 并记 `(no account yielded a catalog)`；成功路径就地提交缓存（WorkBuddy 旧观察点保留）。**回归**：`internal/server/handler_models_rotation_test.go` 四例（换号成功 / 全失败负缓存 / 上限 3 且不重复 / TTL 内不重拉）。**变异**：改回单次 `Pick()` ⇒ 首例 `got 0` 变红。**已知限制**：只改目录拉取，聊天路由仍单号 `Pick`；坏号多于 3 个时仍需等负缓存过期。详见 `docs/决议项.md` R133 |
 | R134 | **DSH 指纹脱敏补全：预检小写不敏感、跨句 @ 路径句整句脱敏、U+2011 错误码、宽松 billing 头正则、整包 BodyFallback、拦截诊断落盘**（2026-10-28，用户附《DSH兼容-非法客户端拦截定位与修复.md》并真机 A/B 实测驱动）：v2.10.0 已拦身份句与 Web GUI（R115），实测暴露三缺口——① `Tokens prefixed with @ …referenced.` + `Relative paths resolve from the workspace root` **跨句连写**回 400 code=11128（单句各自 200、插冠词 The 200）⇒ 第三条指纹无规则；② 全小写身份句回 400 ⇒ 上游**大小写不敏感**而本地预检/改写大小写敏感；③ `tools[].function.description` 等非 messages 字段的品牌串摸不到（结构化清洗只覆盖 content/reasoning_content/tool_calls.arguments）。修法（`internal/sanitize` 与 `internal/upstream/sanitize` **两套同步**）：① 预检表 13 项**全小写** + `asciiContainsFold`（ASCII 折叠零分配，不用 ToLower 整串拷贝——守不变量 16）；② `dshIdentityRe`（容忍 the/`[\s\-_]*`/大小写）命中后**整句替换**为 `claudeCodeIdentity`（R115 插冠词产物仍含品牌串，会被 BodyFallback 二次改写 ⇒ 与 parity 冲突），`dshWebGuiRe`、`acpPathRe`（后半句加冠词 The；前半句单独出现**不是**指纹、不得改）；③ `{"11128","11\u2011128"}` U+2011（渲染同、字节异，ASCII 目标与源同形 = old==new 空转）；④ `hdrKeyRe` 逐字母容忍分隔（`header` 不含连续 `hdr`，照抄文档 `hdr` 正则会漏）；⑤ `BodyFallback` 整包兜底（`bodyDSHRe`→`Claude Code`），接线**两处** PrepareBody 在 `sanitize.Messages` 之后；⑥ diag：`SystemHead(b,n)` + `internal/upstream/diag.go` `DumpBlocked` 落 `data/blocked/blocked-<unixnano>.json` 滚 3 份 + 两处 ChatStream 400 分支打 `[diag] content_blocked system_head=…` 并落盘。`scripts/bisect-blocked.py`（新）分层重放二分被拦样本（`--max-requests 24` 守 §0.1）。**回归**：两套快照（features13/rewrites7/regexes6 逐字节）+ TestACP 跨句/TestLowercase/TestBodyFallback×2/TestSystemHead/CoversUntouchedFields 全绿；二进制字符串验证（`relative paths resolve`×2、`body fallback`×1、`data/blocked`×1、U+2011×1）。**已知限制**：上游判据是黑盒快照，改版需 diag 样本重验；BodyFallback 对无指纹 body 必须零字节改动；部署需重启进程（keepalive 每 5 分钟拉起）。详见 `docs/决议项.md` R134 |
+| R140 | **模型能力声明取「上游声明 ∪ 可复现实测」**（2026-10-28，用户要求复测小浣熊识图能力）：真实 `image_url` A/B 对照（240×140 PNG data URI，无图对照先排除「按提示猜答案」）确认 8 个可识图模型；catalog 的 `vision` tag 漏标 `raccoon-19b265` / `raccoon-405a1c` ⇒ 由 `measuredVisionModels` 补齐，明确返回「当前纯文本模型不支持 image_url」的 `sn-glm-5-3` 必须移除静态表误标。`FetchModels` 的 `SupportsImages = hasTag(tags,"vision") || measuredVisionModels[id]`。**回归** `internal/raccoon/raccoon_test.go` 的 `TestMeasuredVisionCapabilities`（锁 8 个实测模型 + 排除 sn-glm-5-3 + 假 catalog 证明漏 tag 被补齐、纯文本不误标、带 vision tag 的新模型仍自动透出）。详见 `docs/决议项.md` R140 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -447,7 +448,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R134 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R140 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |
