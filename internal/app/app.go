@@ -350,54 +350,65 @@ func (a *App) allStatuses() []pool.Status {
 	return out
 }
 
-// channelOrder 渠道固定展示顺序（面板账号卡片/费率表/设置代理列表统一用此序）。
-// 旧 Qoder 已下线不列；未出现在表中的渠道排最后（按字母序）。
-var channelOrder = map[provider.Kind]int{
-	provider.Oczen: 0, provider.WorkBuddy: 1, provider.WorkBuddyAI: 2,
-	provider.QoderCN: 3, provider.QoderCOM: 4, provider.TraeWork: 5, provider.QwenWork: 6,
-	provider.GLM:       7,
-	provider.OfficeAce: 8,
-	provider.Kilo:      9, // 免密免费池：排序上紧随 oczen 之后（同属无账号渠道）
-	provider.Minimax:   10,
-	provider.LobsterAI: 11,
-	provider.ZCode:     12,
-	provider.Gemini:    13,
-	provider.CodeArts:  14,
-	provider.Comate:    15,
-	provider.Lingxi:    16,
+// channelDisplayRank 渠道展示名次（索引即排序键），从 provider.ChannelDisplayOrder 派生 ——
+// 与前端 CH_LABEL / CH_SUMMARY_ORDER、面板按钮序、费率 tab 序全部同源（R142）。
+var channelDisplayRank = func() map[provider.Kind]int {
+	m := make(map[provider.Kind]int, len(provider.ChannelDisplayOrder))
+	for i, k := range provider.ChannelDisplayOrder {
+		m[k] = i
+	}
+	return m
+}()
+
+// channelSortKey 面板渠道展示排序键（R142）：
+//   - tier 0 = 内建渠道，按**显示名的 UTF-8 字节序**（rank 即 ChannelDisplayOrder 下标）；
+//   - tier 1 = 自定义渠道 / 未登记渠道，**硬编码钉在最末**，组内按渠道标识字节序，
+//     保证同一批自定义渠道每次渲染顺序一致（不依赖入参顺序）。
+//
+// 旧 Qoder 已从界面下线（代码与路由保留）：它仍是内建渠道、有显示名，故落在「Q」位置，
+// 存量账号不再被特殊钉到最末——统一规则不为单个已下线渠道开例外。
+type channelSortKey struct {
+	tier int
+	rank int
+	name string
+}
+
+func channelSortKeyOf(k provider.Kind) channelSortKey {
+	if r, ok := channelDisplayRank[k]; ok {
+		return channelSortKey{tier: 0, rank: r}
+	}
+	return channelSortKey{tier: 1, name: k.String()}
+}
+
+func (a channelSortKey) less(b channelSortKey) bool {
+	if a.tier != b.tier {
+		return a.tier < b.tier
+	}
+	if a.tier == 0 {
+		return a.rank < b.rank
+	}
+	return a.name < b.name
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
-// 与 channelOrder 分开维护：本表把 Oczen 放首位（其免费模型最常被查），
-// kilo 紧随其后（同为免密免费池），且含 TraeCode（与 TraeWork 共账号但模型集不同，需独立成组）。
-var feeChannelOrder = []provider.Kind{
-	provider.Oczen, provider.Kilo, provider.WorkBuddy, provider.WorkBuddyAI, provider.QoderCN,
-	provider.QoderCOM, provider.TraeWork, provider.TraeCode, provider.QwenWork, provider.GLM,
-	provider.Cline, // 漏在此表 = 面板永远不出该渠道 tab（buildFeesChannels 只遍历本表）
-	provider.Comate,
-	provider.Lingxi,
-	provider.MonkeyCode,
-	provider.Raccoon,
-	provider.Loomy,
-	provider.Minimax,
-	provider.LobsterAI,
-	provider.ZCode,
-	provider.Gemini,
-	provider.CodeArts,
-	provider.OfficeAce,
-}
-
-// channelRank 渠道排序键：未知渠道排最后。
-func channelRank(k provider.Kind) int {
-	if r, ok := channelOrder[k]; ok {
-		return r
+// 与面板账号卡片/汇总条同序（R142：按渠道显示名字节序），旧 Qoder 已下线故不列
+// （buildFeesChannels 也会跳过它）。原先「Oczen/Kilo 置首位」的特例被统一规则取代。
+var feeChannelOrder = func() []provider.Kind {
+	out := make([]provider.Kind, 0, len(provider.ChannelDisplayOrder))
+	for _, k := range provider.ChannelDisplayOrder {
+		if k == provider.Qoder {
+			continue
+		}
+		out = append(out, k)
 	}
-	return 100
-}
+	return out
+}()
 
-// sortChannelsByOrder 按 channelOrder 固定顺序稳定排序渠道条目（泛型，复用于各展示处）。
+// sortChannelsByOrder 按展示序稳定排序渠道条目（泛型，复用于各展示处）。
 func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
-	sort.SliceStable(items, func(i, j int) bool { return channelRank(kindOf(items[i])) < channelRank(kindOf(items[j])) })
+	sort.SliceStable(items, func(i, j int) bool {
+		return channelSortKeyOf(kindOf(items[i])).less(channelSortKeyOf(kindOf(items[j])))
+	})
 }
 
 // creditsNAKind 判定该渠道的「积分」概念是否不适用（面板显示「不适用」而不是 0）。
@@ -3871,7 +3882,7 @@ func (a *App) accountViews() []AccountView {
 			RefreshTokenMissingReason: missingRTWhy,
 		})
 	}
-	// 面板固定渠道序展示：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → 千问办公
+	// 面板统一渠道序展示（R142）：按显示名字节序，自定义渠道钉最末。
 	sortChannelsByOrder(out, func(v AccountView) provider.Kind { return provider.Kind(v.Group) })
 	return out
 }
@@ -4812,8 +4823,8 @@ type feesModelRow struct {
 }
 
 // feeChannelOrderWithDynamic 返回费率表渠道顺序：静态 feeChannelOrder + 未登记的动态渠道
-// （自定义渠道，R66）追加到末尾（按名排序）。仅当 modelsByKind 里确有该渠道的模型时
-// 才追加，避免空渠道占位。
+// （自定义渠道，R66）追加到末尾（硬编码钉最末，组内按渠道标识排序）。仅当 modelsByKind
+// 里确有该渠道的模型时才追加，避免空渠道占位。
 func feeChannelOrderWithDynamic(modelsByKind map[provider.Kind][]provider.ModelInfo) []provider.Kind {
 	seen := make(map[provider.Kind]bool, len(feeChannelOrder))
 	for _, k := range feeChannelOrder {
@@ -4938,7 +4949,7 @@ func (a *App) FeesInfo() map[string]any {
 		go a.safeGo(func() { a.RefreshPricing() })
 	}
 
-	// 展示顺序固定（见 feeChannelOrder；旧 Qoder 跳过），**末尾追加动态自定义渠道**（R66）。
+	// 展示顺序见 feeChannelOrder（R142：按渠道显示名字节序，旧 Qoder 跳过），**末尾追加动态自定义渠道**（R66）。
 	// 必须追加：feeChannelOrder 是静态表，自定义渠道不在其中，若不追加则
 	// 面板费率表永远不出现该渠道 tab（buildFeesChannels 只遍历传入的 order）——
 	// 这与 /v1/models、用量流水、运行统计的可见性不一致。按渠道名排序保证稳定顺序。

@@ -1005,8 +1005,31 @@ for (const [label, re] of uniq) {
     // 响应式：断点是按实测溢出阈值卡位的，调宽会破坏桌面端逐像素一致性，调窄则手机仍溢出。
     ["渠道按钮基础为 6 列（消除孤行，按钮数变动时按行自然流）", css.includes("repeat(6, auto)")],
     ["渠道按钮摆位全归 CSS（index.html 不再内联 grid-column，否则窄屏无法重排）", !/btnAdd\w+" style="grid-column/.test(html)],
-    ["渠道按钮 DOM 顺序 = 列配对（同列上下 = 同渠道国内/国际版；自定义渠道垫底）",
-      /btnAddWB\b[\s\S]*?btnAddQoderCN\b[\s\S]*?btnAddTrae\b[\s\S]*?btnAddMonkeyCode\b[\s\S]*?btnAddLoomy\b[\s\S]*?btnAddCline\b[\s\S]*?btnAddWBAI\b[\s\S]*?btnAddQoderCOM\b[\s\S]*?btnAddQwen\b[\s\S]*?btnAddRaccoon\b[\s\S]*?btnAddGLM\b/.test(html)],
+    // R142（2026-10-30 用户拍板）：渠道展示序唯一规则 = 内建渠道按**显示名的 UTF-8 字节序**升序，
+    // 自定义渠道 / 自定义模型**硬编码钉在最末**。三处（面板按钮 / 汇总条 / 后端费率 tab）
+    // 必须同序，否则「账号卡片看到的顺序」与「费率 tab 的顺序」互相打脸。
+    // 下面不再硬编码一串按钮 id（旧的「列配对」写法与字母序规则冲突，已删除）：
+    // 把按钮的 `alt <短类名>` 还原成渠道 key，再断言「它确实按显示名字节序升序 + 自定义垫底」。
+    ["渠道按钮 DOM 顺序 = 按渠道显示名字节序升序，自定义模型垫底（R142）",
+      (() => {
+        const cls2keyOf = (() => {
+          const src = raw.match(/const CH_CLASS = (\{[^}]*\});/);
+          const m = src ? new Function("return (" + src[1] + ")")() : {};
+          const inv = {};
+          for (const [k, c] of Object.entries(m)) inv[c] = k;
+          return inv;
+        })();
+        const labelsOf = (() => {
+          const src = raw.match(/const CH_LABEL = (\{[^}]*\});/);
+          return src ? new Function("return (" + src[1] + ")")() : {};
+        })();
+        const btns = [...html.matchAll(/<button class="btn primary alt (\S+)" id="(btnAdd\w+|btnOpenCustomModels)"/g)]
+          .map((m) => ({ cls: m[1], id: m[2] }));
+        const keys = btns.filter((b) => b.id !== "btnOpenCustomModels").map((b) => cls2keyOf[b.cls]);
+        const sorted = keys.slice().sort((a, b) => (labelsOf[a] < labelsOf[b] ? -1 : labelsOf[a] > labelsOf[b] ? 1 : 0));
+        return btns.length > 0 && btns[btns.length - 1].id === "btnOpenCustomModels" && !keys.includes(undefined) &&
+          keys.join("|") === sorted.join("|");
+      })()],
     ["窄屏渠道按钮自适应列（auto-fit，118px 可在 320px 竖屏排出两列）", css.includes("repeat(auto-fit, minmax(118px, 1fr))")],
     ["按钮紧凑档字号（12px，PC 一行放下 6 个）", /\.panel-actions-wrap \.btn \{ font-size: 12px;/.test(css)],
     // Cline 实测元数据链路：Go 侧（measuredCaps 表 / ContextFromAPI=false / solar 不支持图像）
@@ -1976,14 +1999,65 @@ for (const [label, re] of uniq) {
     checkPal("前端 RESERVED_CHANNEL_NAMES 覆盖全部内建渠道（与 provider.BuiltinKinds 同集）",
       missingReserved.length === 0, `缺 ${missingReserved.join(", ")}`);
 
-    // 2) 积分汇总条顺序：漏渠道 → 该渠道被按字母序垫到最末（注释却说与按钮布局一致）。
-    const orderSrc = raw.match(/const CH_SUMMARY_ORDER = (\[[\s\S]*?\]);/);
-    const order = orderSrc ? new Function("return " + orderSrc[1])() : [];
-    const missingOrder = BUILTIN_CH
-      .map((cls) => Object.keys(CH_CLASS).find((k) => CH_CLASS[k] === cls))
-      .filter((k) => k && !order.includes(k));
-    checkPal("CH_SUMMARY_ORDER 覆盖全部内建渠道（漏项会按字母序垫到最末）",
-      missingOrder.length === 0, `缺 ${missingOrder.join(", ")}`);
+    const labelSrc = raw.match(/const CH_LABEL = (\{[^}]*\});/);
+    const labelMap = labelSrc ? new Function("return (" + labelSrc[1] + ")")() : {};
+
+    // 2) R142 起汇总条顺序**不再手写数组**：手写清单每加一个渠道都要人工同步一份，
+    //    漏改是静默降级（该渠道被垫到最末）。断言它确是由 CH_LABEL 派生 + 按显示名字节序排序。
+    const derivedOrder = /const CH_SUMMARY_ORDER = Object\.keys\(CH_LABEL\)[\s\S]{0,300}?chLabel\(/.test(raw);
+    const handWritten = /const CH_SUMMARY_ORDER = \[/.test(raw);
+    checkPal("CH_SUMMARY_ORDER 由 CH_LABEL 派生（不再手写渠道数组，漏改会静默垫到最末）",
+      derivedOrder && !handWritten, handWritten ? "仍是手写数组" : "未按 CH_LABEL 派生");
+
+    // 2b) 跨语言同序：JS 派生出的汇总条顺序必须与 Go 的 ChannelDisplayOrder 逐项相同。
+    //     Go 侧顺序 = builtinKindList 按 DisplayNames 的字节序（provider.sortedKindsByDisplayName
+    //     现算），这里按同一规则模拟一遍再比 —— 任一侧换了排序口径（例如 JS 用 localeCompare、
+    //     Go 换比较函数）都会红。
+    const labelOf = (k) => labelMap[k] || k;
+    const order = Object.keys(labelMap).sort((a, b) => (labelOf(a) < labelOf(b) ? -1 : labelOf(a) > labelOf(b) ? 1 : 0));
+    {
+      const goSrc = readFileSync(new URL("../internal/provider/provider.go", import.meta.url), "utf8");
+      const kindListSrc = goSrc.match(/var builtinKindList = \[\]Kind\{([\s\S]*?)\n\}/);
+      const kindList = kindListSrc
+        ? [...kindListSrc[1].replace(/\/[\/].*$/gm, "").matchAll(/\b([A-Z][A-Za-z]+)\b/g)].map((m) => m[1])
+        : [];
+      const constOf = {};
+      for (const m of goSrc.matchAll(/^\t([A-Za-z]+)\s+Kind = "([^"]+)"/gm)) constOf[m[1]] = m[2];
+      const goDisp = {};
+      for (const m of goSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")
+        .matchAll(/^\t([A-Za-z]+):\s*"([^"]*)",$/gm)) goDisp[m[1]] = m[2];
+      const goOrder = kindList.map((cn) => [constOf[cn], goDisp[cn]]).filter((p) => p[0] && p[1])
+        .sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)).map((p) => p[0]);
+      const diff = [];
+      if (goOrder.length !== order.length) diff.push(`Go 内建渠道 ${goOrder.length} 个，JS CH_LABEL ${order.length} 个`);
+      for (let i = 0; i < Math.min(goOrder.length, order.length); i++)
+        if (goOrder[i] !== order[i]) diff.push(`第 ${i} 位 JS=${order[i]} Go=${goOrder[i]}`);
+      checkPal("汇总条顺序（JS 由 CH_LABEL 派生）与后端 ChannelDisplayOrder（Go 由 DisplayNames 派生）逐项同序（R142）",
+        diff.length === 0, diff.join("; "));
+    }
+
+    // 2c) Go/JS 显示名必须逐项一致（R142 起排序键就是显示名，漂移会让前后端排出两个顺序）。
+    //     provider.DisplayNames 是 Go 侧真源，CH_LABEL 是 JS 侧副本，两边任一改动都要同步。
+    {
+      const goSrc = readFileSync(new URL("../internal/provider/provider.go", import.meta.url), "utf8");
+      // 表形如：WorkBuddy: "WorkBuddyCN",  注释与空行不参与
+      const goDisp = {};
+      for (const m of goSrc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")
+        .matchAll(/^\t([A-Za-z]+):\s*"([^"]*)",$/gm)) goDisp[m[1]] = m[2];
+      // Go 常量名 → kind 字符串（常量定义行形如 `Cline Kind = "cline"`）
+      const constOf = {};
+      for (const m of goSrc.matchAll(/^\t([A-Za-z]+)\s+Kind = "([^"]+)"/gm)) constOf[m[1]] = m[2];
+      const drift = [];
+      for (const [cn, name] of Object.entries(goDisp)) {
+        const kindStr = constOf[cn];
+        if (!kindStr) { drift.push(`Go 常量 ${cn} 找不到对应 kind`); continue; }
+        if (labelMap[kindStr] !== name) drift.push(`${kindStr}: JS=${labelMap[kindStr] ?? "(无)"} Go=${name}`);
+      }
+      const missInGo = Object.keys(labelMap).filter((k) => !Object.values(goDisp).includes(labelMap[k]));
+      if (missInGo.length) drift.push(`Go 缺显示名: ${missInGo.join(", ")}`);
+      checkPal("渠道显示名 Go(provider.DisplayNames) 与 JS(CH_LABEL) 逐项一致（排序键漂移会让前后端排出两个顺序）",
+        Object.keys(goDisp).length > 0 && drift.length === 0, drift.join("; "));
+    }
 
     // 3) 无签到渠道必须有无签到文案：落兜底「无签到」会把「自动领日活」说错。
     const noExpSrc = raw.match(/const NO_EXPLICIT_CHECKIN = new Set\(\[([^\]]*)\]\)/);

@@ -940,11 +940,14 @@ function creditsText(a) {
   return html;
 }
 
-// 渠道汇总固定顺序：与后端 feeChannelOrder（internal/app/app.go）同序，
+// 渠道汇总顺序（R142）：**直接由 CH_LABEL 派生** —— 内建渠道按显示名的 UTF-8 字节序升序，
+// 与后端 provider.ChannelDisplayOrder / feeChannelOrder、面板按钮序完全同源，
 // 保持「账号卡片 → 汇总条 → 费率 tab」三处看到同一个渠道顺序。
-// ⚠️ 新增渠道必须同步此表：漏项会被 renderSummary 按字母序垫到最末
-//   （ui-static-check 有覆盖度断言）。qoder 已下线，仅为存量账号兜底留位。
-const CH_SUMMARY_ORDER = ["oczen", "kilo", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "traecode", "qwenwork", "glm", "cline", "comate", "lingxi", "monkeycode", "raccoon", "loomy", "minimax", "lobsterai", "zcode", "gemini", "codearts", "officeace", "qoder"];
+// 纯 ASCII 名字自然在前，中文显示名（千问办公 / 小浣熊 / 智谱清言）因码位高自然垫底。
+// ⚠️ 不要再手写一份数组（手写必与后端漂移）；新增渠道只需补 CH_LABEL（ui-static-check
+//   有 Go/JS 显示名逐项一致 + 面板按钮同序两条断言兜住）。qoder 已下线，仍在表内供存量账号兜底。
+const CH_SUMMARY_ORDER = Object.keys(CH_LABEL)
+  .sort((a, b) => (chLabel(a) < chLabel(b) ? -1 : chLabel(a) > chLabel(b) ? 1 : 0));
 
 // renderSummary 渠道积分汇总条：每渠道一行「可用总积分 / 临期」，末尾合计。
 // 数据全部来自 state.accounts（pool 实时值），与账号卡片同源；

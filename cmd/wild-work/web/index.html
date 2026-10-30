@@ -55,39 +55,41 @@
         </div>
         <!-- 中间弹性空白由 flex:1 撑开 -->
         <div class="pa-spacer"></div>
-        <!-- 右组：渠道添加六列 grid，整体靠右；行数由渠道数决定（6 列 × 3 行 = 18 格，
-             当前 18 个渠道 + 自定义模型正好铺满）。
-             列数与列配对由 DOM 顺序决定（行主序自然流），勿再写内联 grid-column/grid-row：
-             那会让窄屏无法重排，也会破坏列配对（scripts/ui-static-check.mjs 有顺序断言）。
-             行1 = WorkBuddyCN | QoderCN | TraeWork | MonkeyCode | Loomy | Cline
-             行2 = WorkBuddyAI | QoderCOM | 千问办公 | 小浣熊 | 智谱清言 | OfficeAce
-             行3 = MiniMax | LobsterAI | ZCode | Gemini | CodeArts | 自定义模型
-             即同列上下配对：WorkBuddyCN/WorkBuddyAI、QoderCN/QoderCOM、TraeWork/千问办公、
-             MonkeyCode/小浣熊、Loomy/智谱清言；Cline 占第一行末位。
-             新增渠道一律追加到自定义模型之前（尾部），配对不乱。
+        <!-- 右组：渠道添加六列 grid，整体靠右；行数由渠道数决定（6 列 × 3 行 + 尾部 2 格）。
+             摆位由 DOM 顺序决定（行主序自然流），勿再写内联 grid-column/grid-row：
+             那会让窄屏无法重排，也会破坏顺序一致性（scripts/ui-static-check.mjs 有顺序断言）。
+
+             排序规则（R142，与 provider.ChannelDisplayOrder 同源）：
+             内建渠道**按显示名的 UTF-8 字节序升序** —— 纯 ASCII 名字自然在前，中文显示名
+             （千问办公 / 小浣熊 / 智谱清言）因码位高自然垫底，WPS Comate / WPS 灵犀 落在 ZCode 之前；
+             **自定义模型硬编码钉在最末**。不引入拼音表（那是额外依赖 + 又一份要人工维护的真源）。
+             故而有按钮的渠道顺次为 Cline → CodeArts → … → WorkBuddyAI → WorkBuddyCN → ZCode →
+             千问办公 → 小浣熊 → 智谱清言 → 自定义模型。
+             无按钮的渠道：TraeCode（随 TraeWork 绑定）、Kilo / OpenCodeZen（无账号免密）、
+             旧 Qoder（已下线）。
              ⚠️ 每个按钮都必须带 `alt <渠道短类名>` 修饰类：裸 `btn primary`
                会落到 --primary（现与 --ch-wb 同值，改色板时就静默错色）。 -->
         <!-- 旧 Qoder 渠道已下线（代码保留，仅删界面入口） -->
         <div class="pa-group pa-right">
-          <button class="btn primary alt wb" id="btnAddWB">＋ WorkBuddyCN</button>
-          <button class="btn primary alt qodercn" id="btnAddQoderCN">＋ QoderCN</button>
-          <button class="btn primary alt trae" id="btnAddTrae">＋ TraeWork</button>
-          <button class="btn primary alt monkeycode" id="btnAddMonkeyCode">＋ MonkeyCode</button>
-          <button class="btn primary alt loomy" id="btnAddLoomy">＋ Loomy</button>
           <button class="btn primary alt cline" id="btnAddCline" title="免费池渠道：粘贴官方 API Key，须为多个独立账号各自的 Key">＋ Cline</button>
+          <button class="btn primary alt codearts" id="btnAddCodeArts" title="CodeArts（华为云）：PKCE 授权登录，支持多账号；免费额度按 UTC+8 自然日重置">＋ CodeArts</button>
+          <button class="btn primary alt gemini" id="btnAddGemini" title="Gemini（Google Code Assist）：本机回调授权登录，支持多账号">＋ Gemini</button>
+          <button class="btn primary alt lobsterai" id="btnAddLobsterAI" title="LobsterAI（有道龙虾）：本机回调授权登录，支持多账号">＋ LobsterAI</button>
+          <button class="btn primary alt loomy" id="btnAddLoomy">＋ Loomy</button>
+          <button class="btn primary alt minimax" id="btnAddMiniMax" title="MiniMax Code（中国版）：设备码授权登录，支持多账号">＋ MiniMax</button>
+          <button class="btn primary alt monkeycode" id="btnAddMonkeyCode">＋ MonkeyCode</button>
+          <button class="btn primary alt officeace" id="btnAddOfficeAce" title="华为云果办：从本机 OfficeAce 客户端导入或自助 OAuth 登录">＋ OfficeAce</button>
+          <button class="btn primary alt qodercn" id="btnAddQoderCN">＋ QoderCN</button>
+          <button class="btn primary alt qodercom" id="btnAddQoderCOM">＋ QoderCOM</button>
+          <button class="btn primary alt trae" id="btnAddTrae">＋ TraeWork</button>
           <button class="btn primary alt comate" id="btnAddComate" title="WPS Comate 渠道：粘贴浏览器 Cookie 里的 wps_sid，须为多个独立 WPS 账号各自的 sid">＋ WPS Comate</button>
           <button class="btn primary alt lingxi" id="btnAddLingxi" title="WPS 灵犀渠道：粘贴 lingxi.kdocs.cn 的 wps_sid Cookie，须灵犀侧已开通（有智点余额），须为多个独立 WPS 账号各自的 sid">＋ WPS 灵犀</button>
           <button class="btn primary alt wbai" id="btnAddWBAI">＋ WorkBuddyAI</button>
-          <button class="btn primary alt qodercom" id="btnAddQoderCOM">＋ QoderCOM</button>
+          <button class="btn primary alt wb" id="btnAddWB">＋ WorkBuddyCN</button>
+          <button class="btn primary alt zcode" id="btnAddZCode" title="ZCode（智谱）：设备授权登录；积分领取依赖网页验证码，本工具不自动领取">＋ ZCode</button>
           <button class="btn primary alt qwenwork" id="btnAddQwen">＋ 千问办公</button>
           <button class="btn primary alt raccoon" id="btnAddRaccoon">＋ 小浣熊</button>
           <button class="btn primary alt glm" id="btnAddGLM" title="体验渠道：仅文本对话，不支持工具调用/多模态">＋ 智谱清言</button>
-          <button class="btn primary alt officeace" id="btnAddOfficeAce" title="华为云果办：从本机 OfficeAce 客户端导入或自助 OAuth 登录">＋ OfficeAce</button>
-          <button class="btn primary alt minimax" id="btnAddMiniMax" title="MiniMax Code（中国版）：设备码授权登录，支持多账号">＋ MiniMax</button>
-          <button class="btn primary alt lobsterai" id="btnAddLobsterAI" title="LobsterAI（有道龙虾）：本机回调授权登录，支持多账号">＋ LobsterAI</button>
-          <button class="btn primary alt zcode" id="btnAddZCode" title="ZCode（智谱）：设备授权登录；积分领取依赖网页验证码，本工具不自动领取">＋ ZCode</button>
-          <button class="btn primary alt gemini" id="btnAddGemini" title="Gemini（Google Code Assist）：本机回调授权登录，支持多账号">＋ Gemini</button>
-          <button class="btn primary alt codearts" id="btnAddCodeArts" title="CodeArts（华为云）：PKCE 授权登录，支持多账号；免费额度按 UTC+8 自然日重置">＋ CodeArts</button>
           <button class="btn primary alt custom" id="btnOpenCustomModels" title="自定义模型（OpenAI 兼容）：接入任意兼容端点，Provider 与模型都在一个弹窗里增删改">＋ 自定义模型</button>
         </div>
       </div>

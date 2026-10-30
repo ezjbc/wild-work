@@ -515,7 +515,7 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
   - ⚠️ **平台限制**：MonkeyCode / 小浣熊 / Loomy 的「从客户端导入」路径探测**跨平台**（用标准用户目录 / 环境变量定位客户端凭据，macOS / Linux 上客户端把配置写在标准位置即可命中，找不到则返回明确报错）。小浣熊的**网页版自动登录同样跨平台**（纯 HTTP + 系统 Edge/Chrome，不依赖注册表）；小浣熊 / Loomy 官方另有 macOS / Linux 客户端，MonkeyCode 客户端则仅发布过 Windows 版（其导入在非 Windows 仍会按上述口径尽力而为）。其余渠道（WorkBuddy 系 / Trae 系 / Qoder 系 / 千问办公 / 智谱清言 / Cline）跨平台可用（Cline 是纯 HTTP + 官方 API Key，不依赖本机客户端，天然跨平台）。
 - **账号管理**：卡片显示积分、签到状态（WorkBuddy 国际版显示「自动领日活奖励」）；图标按钮操作（签到 ✓ / 刷新 ↻ / 停用 ⏸ / 删除 ✕）
   - **修改显示名**：点击卡片上的账号名即可修改，用于给账号起好认的别名
-  - 账号按固定渠道序展示：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → 千问办公 → 智谱清言 → Cline → MonkeyCode → 小浣熊 → Loomy
+  - 账号按**渠道显示名的字母序**展示（Unicode 码位序，中文名因码位高自然排在最后）：Cline → CodeArts → Gemini → Kilo → LobsterAI → Loomy → MiniMax → MonkeyCode → OfficeAce → OpenCodeZen → Qoder → QoderCN → QoderCOM → TraeCode → TraeWork → WPS Comate → WPS 灵犀 → WorkBuddyAI → WorkBuddyCN → ZCode → 千问办公 → 小浣熊 → 智谱清言；**自定义渠道硬编码排在最后**（同组内按渠道标识排）。账号卡片、积分汇总条、费率 tab 三处同一顺序，规则单一来源（见决议 R142）
   - 积分显示为「可用积分」；若该账号还有本工具用不了的额度（如 TraeWork 官方客户端专用池），会追加显示 `/ N 不可用`
 - **积分明细**：鼠标悬停积分数字显示套餐明细（含有效期与可用/不可用小计），条目多时用底部 `‹ ›` 翻页
 - **刷新积分**：面板顶部按钮，批量刷新全部账号余额
