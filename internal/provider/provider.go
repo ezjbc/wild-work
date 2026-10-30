@@ -75,6 +75,11 @@ const (
 	// Cookie 不轮换 ⇒ 无 RefreshToken、无保活、无签到；上游无积分查询端点（积分只能从
 	// 逐请求 usage.credits 记账）。模型面绑死上游 /models 的 items 数组原样透传。
 	Comate Kind = "comate"
+	// Lingxi WPS 灵犀（lingxi.kdocs.cn 网页版助手）：粘贴型渠道，凭据与 comate 同为
+	// **wps_sid Cookie**（同一 WPS 账号体系但**门禁独立**——灵犀侧开通即可用）。
+	// 有每日签到（领智点）与余额端点；对话是 sessions+completions 两段式（每请求新建
+	// session）+ 自有 SSE 帧型（非 OpenAI 形）。模型面来自 plans 端点 data.models 原样透传。
+	Lingxi Kind = "lingxi"
 )
 
 func (k Kind) String() string { return string(k) }
@@ -89,7 +94,7 @@ func BuiltinKinds() map[string]bool {
 	m := map[string]bool{}
 	for _, k := range []Kind{WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
 		QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce, Kilo, Minimax, LobsterAI,
-		Gemini, CodeArts, ZCode, Comate} {
+		Gemini, CodeArts, ZCode, Comate, Lingxi} {
 		m[k.String()] = true
 	}
 	for ns := range ModelNamespaces {

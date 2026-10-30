@@ -733,8 +733,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", oczen: "OpenCodeZen", kilo: "Kilo", minimax: "MiniMax", lobsterai: "LobsterAI", zcode: "ZCode", gemini: "Gemini", codearts: "CodeArts", cline: "Cline", officeace: "OfficeAce", comate: "WPS Comate" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", kilo: "kilo", minimax: "minimax", lobsterai: "lobsterai", zcode: "zcode", gemini: "gemini", codearts: "codearts", cline: "cline", officeace: "officeace", comate: "comate" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", oczen: "OpenCodeZen", kilo: "Kilo", minimax: "MiniMax", lobsterai: "LobsterAI", zcode: "ZCode", gemini: "Gemini", codearts: "CodeArts", cline: "Cline", officeace: "OfficeAce", comate: "WPS Comate", lingxi: "WPS 灵犀" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", kilo: "kilo", minimax: "minimax", lobsterai: "lobsterai", zcode: "zcode", gemini: "gemini", codearts: "codearts", cline: "cline", officeace: "officeace", comate: "comate", lingxi: "lingxi" };
 const chLabel = (k) => CH_LABEL[k] || k;
 const chClass = (k) => CH_CLASS[k] || "custom";
 // ---------- 图表配色：与徽章同源，但保证同图任意两条线颜色可辨 ----------
@@ -849,11 +849,14 @@ const isImportLocal = (ch) => IMPORT_LOCAL_CHANNELS.has(ch);
 // Loomy 也两个集合都命中，但机制不同：**不**拉浏览器、**不**用 CDP 捕获，而是起一个
 // 127.0.0.1 的本机登录引导页（手机号 + 短信验证码），由前端 window.open 打开
 // （见 internal/login_loomy）。故文案需按渠道区分，不能套用小浣熊那段。
-const WEB_LOGIN_CHANNELS = new Set(["raccoon", "loomy"]);
+// WPS 灵犀同走 CDP 捕获（internal/login_lingxi）：主按钮浏览器自动登录，
+// 等价入口「粘贴 wps_sid」保留在 promptLogin 的 lingxi 分支（弹 lingxiOverlay）。
+const WEB_LOGIN_CHANNELS = new Set(["raccoon", "loomy", "lingxi"]);
 const hasWebLogin = (ch) => WEB_LOGIN_CHANNELS.has(ch);
 // 粘贴凭据型渠道：没有浏览器登录编排，凭据由用户从官方站点自行创建后粘贴进来。
 // Cline：app.cline.bot → 注册账号 → Account / API Keys 建 sk_ Key（见 internal/cline）。
 // Comate：WPS 账号 → 浏览器登录 www.wps.cn → 复制 Cookie 里的 wps_sid（见 internal/comate）。
+// Lingxi 的粘贴入口在 promptLogin 特例里（同 Comate 一样不占这个名单）。
 const PASTE_KEY_CHANNELS = new Set(["cline", "comate"]);
 const isPasteKey = (ch) => PASTE_KEY_CHANNELS.has(ch);
 // 无手动签到渠道的状态文案：每个在 NO_EXPLICIT_CHECKIN 里的渠道都要有一条
@@ -889,7 +892,8 @@ const isVirtualCh = (g) => VIRTUAL_ACCOUNTS.has(String(g || "workbuddy"));
 // officeace 一并纳入（2026-10-17）：它除了「登录态失效」，还有「缺 refresh_token」
 // 这种**不能自愈**的形态（客户端导入只拿得到不过期的网关 Basic），此时同样只能重新登录
 // 才能恢复积分/签到 —— 徽标与 ⟳ 入口由同一处逻辑驱动（见 renderAccounts 的 needRelogin）。
-const RELOGIN_CHANNELS = new Set(["workbuddy", "workbuddyai", "traework", "qoder", "qodercn", "qodercom", "qwenwork", "raccoon", "officeace"]);
+// Lingxi 纳入（灵犀登录态失效可 ⟳ 重登：CDP 自动登录流 login_lingxi）。
+const RELOGIN_CHANNELS = new Set(["workbuddy", "workbuddyai", "traework", "qoder", "qodercn", "qodercom", "qwenwork", "raccoon", "officeace", "lingxi"]);
 
 // creditsText 账号卡片的积分文案。
 // 拆成「可用 / 不可用 / 临期」三个数字：渠道（如 TraeWork）会下发官方客户端专用的
@@ -940,7 +944,7 @@ function creditsText(a) {
 // 保持「账号卡片 → 汇总条 → 费率 tab」三处看到同一个渠道顺序。
 // ⚠️ 新增渠道必须同步此表：漏项会被 renderSummary 按字母序垫到最末
 //   （ui-static-check 有覆盖度断言）。qoder 已下线，仅为存量账号兜底留位。
-const CH_SUMMARY_ORDER = ["oczen", "kilo", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "traecode", "qwenwork", "glm", "cline", "comate", "monkeycode", "raccoon", "loomy", "minimax", "lobsterai", "zcode", "gemini", "codearts", "officeace", "qoder"];
+const CH_SUMMARY_ORDER = ["oczen", "kilo", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "traecode", "qwenwork", "glm", "cline", "comate", "lingxi", "monkeycode", "raccoon", "loomy", "minimax", "lobsterai", "zcode", "gemini", "codearts", "officeace", "qoder"];
 
 // renderSummary 渠道积分汇总条：每渠道一行「可用总积分 / 临期」，末尾合计。
 // 数据全部来自 state.accounts（pool 实时值），与账号卡片同源；
@@ -1202,7 +1206,11 @@ function renderAccounts() {
       ? `<span class="tag warn" title="${esc(a.refresh_token_missing_reason || "凭据缺 refresh_token：积分/签到不可用，需重新登录或重新导入")}">缺续期凭据</span>`
       : "";
     const needRelogin = Boolean(a.session_dead) || missingRT;
-    const reloginTitle = missingRT
+    // lingxi 特例文案：重登弹的是双路径弹层（浏览器登录 / 粘贴 wps_sid 任选），
+    // 且 wps_sid 不回传身份字段——重登会落成新条目，旧失效卡需手动删。
+    const reloginTitle = a.group === "lingxi"
+      ? "重新登录（浏览器登录或重新粘贴 wps_sid 均可；重登会落成新条目，旧失效卡片请手动删除）"
+      : missingRT
       ? "重新登录（本账号缺 refresh_token，积分/签到不可用；登录成功后自动补签）"
       : "重新登录（跳转登录页换新凭据，成功后自动补签）";
     // 一键重新登录：沿用既有内联 onclick 形态（本仓无 CSP 头，全文件已有 10 处同款写法）。
@@ -1211,8 +1219,11 @@ function renderAccounts() {
     // 一次性的 POST /api/login/start。2026-10-18 修正：先前 OfficeAce 的 ⟳ 直接打
     // /api/login/start，而后端 StartLoginFor 未登记 officeace ⇒ 点了只弹
     // `unknown login provider officeace`（死按钮，独立复核抓出）。
+    // Lingxi 是完整登录流（login_lingxi CDP）：⟳ 统一走 startLogin、
+    // 进 RELOGIN_CHANNELS，登录弹窗里主按钮「浏览器登录」+ 次按钮「粘贴 wps_sid」。
+    const reloginAction = `startLogin('${a.group}')`;
     const reloginBtn = needRelogin && RELOGIN_CHANNELS.has(a.group)
-      ? `<span class="icon-op" title="${reloginTitle}" onclick="startLogin('${a.group}')">⟳</span>`
+      ? `<span class="icon-op" title="${reloginTitle}" onclick="${reloginAction}">⟳</span>`
       : "";
     const ops = fixedAcct
       ? `${channelHelp}<span class="icon-op off" title="固定账号，不可停用/删除" onclick="return false">🔒</span>`
@@ -1863,6 +1874,32 @@ function promptLogin(channel) {
       $("loginConfirmOverlay").classList.remove("hidden");
       return;
     }
+    if (channel === "lingxi") {
+      // WPS 灵犀：CDP 捕获 www.wps.cn 登录后的 wps_sid（internal/login_lingxi）。
+      // 与 comate 完全同形（主按钮拉浏览器自动捕获，次按钮弹粘贴框）；
+      // ⚠ 验证走灵犀侧 plans 端点（lingxi.ValidateSID），不是 comate 的 /models。
+      $("lcMsg").innerHTML = `点击「浏览器登录」会打开一个<b>独立的浏览器窗口</b>并前往 WPS 官网，`
+        + `请在其中正常登录你的 WPS 账号（扫码 / 手机号 / 微信均可），`
+        + `登录完成后本工具会自动捕获 wps_sid 并添加账号（验证走灵犀侧，要求灵犀已开通）。`
+        + `<div class="glm-warn" style="margin-top:10px">`
+        + `<div class="glm-warn-title">⚠️ 关于 wps_sid 有效期</div>`
+        + `wps_sid 是登录 Cookie，<b>不参与自动续期</b>：在官网主动退出登录或修改密码后可能失效。`
+        + `失效后账号卡片会出现 ⟳ 入口，点它重新走一遍本流程即可恢复。`
+        + `</div>`
+        + `也可以点「粘贴 wps_sid」：在已登录 lingxi.kdocs.cn 的浏览器里按 F12 复制该 Cookie 后粘入（效果等价）。`;
+      $("btnLoginConfirm").textContent = "浏览器登录";
+      altBtn.textContent = "粘贴 wps_sid";
+      altBtn.classList.remove("hidden");
+      altBtn.onclick = () => {
+        $("loginConfirmOverlay").classList.add("hidden");
+        $("lingxiSidInput").value = "";
+        $("lingxiErr").textContent = "";
+        $("lingxiOverlay").classList.remove("hidden");
+        setTimeout(() => $("lingxiSidInput").focus(), 30);
+      };
+      $("loginConfirmOverlay").classList.remove("hidden");
+      return;
+    }
     $("lcMsg").innerHTML = `点击「登录${name}」会打开一个<b>独立的浏览器窗口</b>（不影响你日常浏览器的登录态），`
       + `请在其中正常登录（扫码 / 手机号 / 微信均可），登录完成后本工具会自动捕获凭据并保存账号。`
       + `<div class="glm-warn" style="margin-top:10px">`
@@ -2423,6 +2460,30 @@ async function submitComateSID() {
   }
 }
 
+// submitLingxiSID 提交用户粘贴的 wps_sid Cookie（灵犀渠道）。
+// 后端只做「GET plans 验证 + 落盘」，零智点消耗，且能在验证阶段发现
+// 「灵犀侧未开通」（UserUnauthorized）；warning 语义同 comate（同账号不扩智点）。
+async function submitLingxiSID() {
+  const sid = ($("lingxiSidInput").value || "").trim();
+  if (!sid) { $("lingxiErr").textContent = "请粘贴 wps_sid Cookie"; return; }
+  const btn = $("btnLingxiSubmit");
+  btn.disabled = true;
+  $("lingxiErr").textContent = "验证中…";
+  try {
+    const r = await api("/api/login/lingxi_sid", { sid });
+    $("lingxiOverlay").classList.add("hidden");
+    $("lingxiSidInput").value = "";
+    if (r && r.warning) toast(r.warning);
+    toast("WPS 灵犀账号已添加");
+    await loadState();
+    refreshFees();
+  } catch (e) {
+    $("lingxiErr").textContent = e.message || "验证失败";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // 手工兜底：粘贴 refresh_token
 async function submitGLMToken() {
   const token = ($("glmTokenInput").value || "").trim();
@@ -2681,7 +2742,7 @@ async function saveModelFallback() {
 const RESERVED_CHANNEL_NAMES = new Set([
   "workbuddy", "workbuddyai", "traework", "traecode", "qoder", "qodercn", "qodercom",
   "qwenwork", "monkeycode", "raccoon", "loomy", "oczen", "kilo", "minimax", "lobsterai",
-  "zcode", "gemini", "codearts", "glm", "cline", "officeace", "comate",
+  "zcode", "gemini", "codearts", "glm", "cline", "officeace", "comate", "lingxi",
   "cline-free", // ModelNamespaces：上游 ID 自带命名空间，自定义渠道不得占用
 ]);
 let editCustomChannels = [];
@@ -3679,6 +3740,9 @@ function bind() {
   $("btnComateSubmit").onclick = submitComateSID;
   $("btnComateCancel").onclick = cancelComateLogin;
   $("btnComateToggleManual").onclick = () => $("comateManual").classList.toggle("hidden");
+  $("btnAddLingxi").onclick = () => promptLogin("lingxi");
+  $("btnLingxiSubmit").onclick = submitLingxiSID;
+  $("btnLingxiCancel").onclick = () => $("lingxiOverlay").classList.add("hidden");
   $("btnAddOfficeAce").onclick = () => promptLogin("officeace");
   $("btnAddMiniMax").onclick = () => promptLogin("minimax");
   $("btnAddLobsterAI").onclick = () => promptLogin("lobsterai");
