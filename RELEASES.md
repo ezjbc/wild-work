@@ -3946,3 +3946,62 @@ WPS 的 AI 办公助手（`lingxi.kdocs.cn`），**第 23 条内建渠道**。�
 以及 [@C3H3-AI](https://github.com/C3H3-AI) 的 PR #196（DSH `@` 引用约定段脱敏）——其结论已被
 PR #200 的完整重写覆盖（且两者对「前半句该不该改」的判断相反，以真机 A/B 为准），本版不重复合入，
 仍致谢其先行定位。
+
+
+# wild-work v2.11.1
+
+小版本，只有一件事：**面板上的渠道顺序统一成一条规则**（R142）。
+
+## 🔀 渠道展示序统一（R142）
+
+内建渠道按**显示名的 Unicode 码位序**（即 UTF-8 字节序）升序排列，**自定义渠道硬编码钉在最末**
+（同组内按渠道标识升序）。账号卡片、积分汇总条、费率 tab、主工具栏渠道按钮——四处现在同一顺序。
+
+排出来的实际顺序：
+
+```
+Cline → CodeArts → Gemini → Kilo → LobsterAI → Loomy → MiniMax → MonkeyCode
+→ OfficeAce → OpenCodeZen → Qoder → QoderCN → QoderCOM → TraeCode → TraeWork
+→ WPS Comate → WPS 灵犀 → WorkBuddyAI → WorkBuddyCN → ZCode
+→ 千问办公 → 小浣熊 → 智谱清言 → [自定义渠道…]
+```
+
+不用拼音序：拼音表是额外依赖 + 又一份要人工维护的真源，而码位序自带稳定定序，
+中文名因码位高天然排在最后（`WPS 灵犀` 也就自然落在 `ZCode` 之前）。
+细节三处：`WPS Comate` 在 `WPS 灵犀` 之前（`C` < `灵`）；`WorkBuddyAI` 在 `WorkBuddyCN` 之前（`A` < `C`，
+按**显示名**比而非渠道标识）；`TraeCode` 仍无独立按钮（随 TraeWork 绑定），`Kilo`/`OpenCodeZen`
+免密无账号、旧 `Qoder` 已下线，三者不占按钮位。
+
+## 🧹 顺带清掉四处重复的顺序表
+
+顺序此前散在四处各自维护：`channelOrder`（16 项手工编号）、`feeChannelOrder`（22 项手工列表）、
+`app.js` 的 `CH_SUMMARY_ORDER`（23 项手写数组）、`index.html` 的按钮 DOM 序。每加一个渠道要人工
+同步四处，**漏一处没有报错**——轻则汇总条把该渠道按字母序垫到最末，重则费率面板根本不出现该渠道
+tab（`buildFeesChannels` 只遍历 `feeChannelOrder`，Cline 接入时踩过）。
+
+现在真源只有一个：`internal/provider` 的 `DisplayNames`（显示名）+ `ChannelDisplayOrder`（按名字
+字节序现算）；`app.js` 的 `CH_SUMMARY_ORDER` 改为由 `CH_LABEL` 派生，不再手写。
+新增渠道只需补 `CH_LABEL` 一行，顺序自动归位。
+
+## 🛡️ 防漂移护栏
+
+`scripts/ui-static-check.mjs` 新增三条**跨语言**断言（它会直接读 Go 源码）：显示名 Go/JS 逐项一致、
+汇总条顺序与 `ChannelDisplayOrder` 逐项同序、`CH_SUMMARY_ORDER` 必须派生不得手写。原「按钮顺序 =
+6 列列配对」的硬编码正则已删除，改为「从 `alt <短类名>` 还原渠道 key，断言按显示名字节序 + 自定义垫底」。
+
+回归：`TestDisplayNamesCoverAllBuiltins` / `TestDisplayNameFallback` / `TestChannelDisplayOrderIsByteOrder` /
+`TestChannelDisplayOrderSpotChecks` / `TestFeeChannelOrderFollowsDisplayOrder` / `TestSortChannelsByOrderCustomLast`；
+`TestFeeChannelOrderCoversAllKinds` 的判据也从手写 14 项改为遍历 `ChannelDisplayOrder`（原先漏补等于该渠道
+从未被校验）。四处变异（交换按钮 / 改显示名 / 排序改回按 kind / 回退手写数组）均已确认变红。
+
+## 📚 文档
+
+- `AGENTS.md` / `docs/决议项.md` 新增 R142（渠道展示序的唯一规则与四条已知限制）。
+- `README.md` 渠道序说明同步改为字母序 + 自定义垫底。
+
+## 已知限制
+
+- 按钮顺序不再保证「同列上下 = 国内/国际版」配对：`WorkBuddyCN`/`WorkBuddyAI` 现在相邻但不上下，
+  窄屏 `auto-fit` 重排后列位置本就随机。
+- 排序键是**显示名**而非渠道标识，故改显示名会带着改顺序（这是刻意的：面板上看到的顺序跟着名字走）。
+- 旧 `Qoder` 仍是内建渠道、有显示名，落在字母序的「Q」位置，账号卡片只为存量账号保留它。
