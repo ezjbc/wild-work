@@ -647,8 +647,9 @@ const FAKE_STATS = {
   // 注意 ③ 的 risk 故意给 true：颜色必须跟 urgency 走，不跟 risk 走——
   // 此前用 risk 上色导致 7 天内的行全红（135h 后到期的也红，用户实测反馈）。
   // 「花费」取净花费 today_spent，不取含作废的 today_out：
-  //   ① 健康号 today_out=30 里含 10 分到期作废 ⇒ 花费 20 · 已作废 10；
-  //   ② 远期号故意**不写** today_spent/today_expired（老后端形态）⇒ 必须退回 today_out=7。
+  //   ① 健康号 today_out=30 里含 10 分到期作废 ⇒ 花费 20。
+  //   ② 远期号故意**不写** today_spent（老后端形态）⇒ 必须退回 today_out=7。
+  // today_expired 仍下发（账号全天口径），但临期行**不渲染**它——见下方断言。
   expiry: [
     { uid: "4298452267967801", nickname: "健康号", group: "traework", expire_at: "2026-10-20T00:00:00+08:00", hours_left: 5.7, days_left: 0, amount: 100, today_out: 30, today_spent: 20, today_expired: 10, burn_forecast: 45, risk: true, urgency: "today" },
     { uid: "4298452267967802", nickname: "闲置号", group: "qwenwork", expire_at: "2026-10-20T08:45:21+08:00", hours_left: 4.7, days_left: 0, amount: 100, today_out: 0, today_spent: 0, today_expired: 0, burn_forecast: -1, risk: true, urgency: "today" },
@@ -742,10 +743,15 @@ check("到期前还会废量 = 额度−外推消耗（55分）", stExpiry.inclu
 // 这正是用户报的「都消耗完了怎么还有作废」——差值把作废算成消耗，才会自相矛盾。
 check("今日花费取净花费而非差值（花费 20，非 30）",
   stExpiry.includes("花费 20") && !stExpiry.includes("花费 30"));
-// 「今日已废」与「到期前还会废」是两个不同的包，文案必须带批次限定词，
-// 否则并排显示会被读成「废了两次」（实测用户观感）。
-check("今日作废额带批次限定词（今日已废 10）", stExpiry.includes("今日已废 10"));
-// 无 today_spent/today_expired 的老后端载荷必须退回 today_out，不能渲染空白或 NaN。
+// 临期行只讲**本行这一批**：行体里绝不能出现账号全天口径的「今日已废」。
+// 曾把两者并排渲染成「300分 · 花费 0 · 今日已废 300 · 到期前还会废 300分」，
+// 同一行读成废了 600 分（用户实测反馈）。该数改由平台表「今日作废」列承接。
+// 只查数据行体：表头 title 里作为说明提到该词是允许的。
+const exBodyRows = stExpiry.split('<div class="st-ex-row').slice(1)
+  .filter((r) => !r.includes("st-ex-head"));
+check("临期行体不渲染账号全天口径「今日已废」",
+  exBodyRows.length > 0 && exBodyRows.every((r) => !r.includes("今日已废")));
+// 无 today_spent 的老后端载荷必须退回 today_out，不能渲染空白或 NaN。
 check("老后端无 today_spent 时退回差值（花费 7）",
   stExpiry.includes("花费 7") && !stExpiry.includes("NaN"));
 
