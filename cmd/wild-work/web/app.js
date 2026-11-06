@@ -4848,22 +4848,19 @@ function fmtExpireAt(s) {
     `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
 }
 
-// 最近临期：到期日升序；risk=按今日速度花不完 → 提示这批会作废
+// 最近临期：到期日升序；额度格只显示这批还剩多少分。
 //
-// 额度格只讲**本行这一批**，且**只讲一个时间点**（2026-11-06 三次修定稿）：
-// 额度 N分 · 到期前还会废 N分（仅 risk 行显示后半段）。
-//
-// 演进教训（三次都是同一类错：一行里塞了互不相容的口径）：
+// 演进教训（四次都是同一类错：额度格里塞了与「剩余」不同口径/不同时刻/不同批次的数）：
 //  ①「300分 · 已耗 300 · 预计作废 264分」——today_out 是余额差值，把到期作废
 //    也算成消耗，于是「花完了还会作废」。
 //  ②「300分 · 花费 0 · 今日已废 300 · 到期前还会废 300分」——today_expired 是
-//    **账号全天**口径（可含本行之外的包），与本行额度不同批次，并排读成废了 600。
-//  ③「91分 · 花费 2 · 到期前还会废 86分」——91 是「已花掉 2 之后」的剩余，
-//    86 扣的是「未来还能花的 5」，两个数不在同一时间轴，用户算 91−2=89 对不上。
-// 结论：外推（burn_forecast）不再上行内——它既要假设今日速度持续，又让同行数字
-// 互相算不平。行内只留同一时刻的两个量：现在还剩多少、到期没花掉就全废多少。
-// 净花费 today_spent 与账号今日作废 today_expired 仍随载荷下发，
-// 分别由平台表「今日消耗」「今日作废」列承接，不在本行重复。
+//    **账号全天**口径（可含本行之外的包），并排读成废了 600。
+//  ③「91分 · 花费 2 · 到期前还会废 86分」——amount 已扣过花费，外推又扣未来预估
+//    花费，两条时间轴，用户算 91−2≠86。
+//  ④ 最终定稿：只留一个数——**这批还剩多少分**。用户原话「你就显示还剩下多少分，
+//    别到期前了」。剩余额度本身已含「到期就清零」的含义，无需再预测。
+// today_spent / today_expired / burn_forecast / risk 仍随载荷下发（平台表与后端
+// 判定在用），前端本行一律不渲染。
 function renderExpiry(ex) {
   if (!ex.length) { $("stExpiry").innerHTML = ""; $("stExpiry").className = "st-expiry"; return; }
   let html = `<div class="st-block-title">最近临期<span class="st-hint">按剩余时长升序 · ${ex.length} 个账号</span></div>` +
@@ -4874,7 +4871,7 @@ function renderExpiry(ex) {
     `<span class="st-ex-name">账号</span>` +
     `<span class="st-ex-date">到期时刻</span>` +
     `<span class="st-ex-days">剩余</span>` +
-    `<span class="st-ex-amt" title="额度 = 本行这批包（同一到期日）现在还剩下的积分。到期前还会废 = 这批到点用不掉就清零的量；只有按今日速度确实花不完时才显示，没有这个提示就是预计能花完。今日已经花掉的额度不在本行展示，见平台表「今日消耗」列。">额度 · 到期前还会废</span>` +
+    `<span class="st-ex-amt" title="这批积分包（同一到期时刻）当前还剩多少分。到期时刻一到，没用掉的部分会被清零。">额度 · 剩余</span>` +
     `</div>`;
   ex.forEach((r, i) => {
     // 剩余时长优先用后端下发的精确小时数（hours_left），退回自然日文案兜底。
@@ -4883,16 +4880,9 @@ function renderExpiry(ex) {
     const dayTxt = Number.isFinite(h) && h > 0
       ? (h < 1 ? `${Math.round(h * 60)} 分钟后` : `${h.toFixed(1)} 小时后`)
       : (r.days_left <= 0 ? "今日到期" : (r.days_left === 1 ? "明日到期" : `${r.days_left} 天后到期`));
-    // 到期前还会废：只讲「这批到点没花掉的部分」。不再按今日速度外推——
-    // 外推值既依赖「今日速度会持续」这个假设，又让同行数字算不平（用户实测
-    // 「91分 · 花费 2 · 到期前还会废 86分」，91−2≠86）。现在直接等于当前剩余额度：
-    // 到期时刻一到，没花掉的就是全废。risk=false（按今日速度能花完）时不显示。
-    // 老后端 risk 字段恒有，故无需回退。
-    const burn = r.risk ? ` · 到期前还会废 ${fmtCredits(r.amount)}分` : "";
     // 配色按**紧迫度**（后端 urgency），不按 risk：
     //   今天到期 → 红（st-risk）；明天到期 → 黄（st-warn）；更远 → 不上色。
     // 此前用 risk 上色，7 天内的行全飘红（135 小时后到期的也红），一片警示等于没有警示。
-    // 「到期前还会废」文字仍只跟 risk 走：那是数据结论，与颜色分档独立。
     const urg = r.urgency === "today" ? " st-risk"
       : (r.urgency === "tomorrow" ? " st-warn" : "");
     html += `<div class="st-ex-row${urg}">` +
@@ -4901,7 +4891,7 @@ function renderExpiry(ex) {
       `<span class="st-ex-name" title="${esc(r.uid)}">${esc(r.nickname || r.uid)}</span>` +
       `<span class="st-ex-date">${esc(fmtExpireAt(r.expire_at))}</span>` +
       `<span class="st-ex-days">${esc(dayTxt)}</span>` +
-      `<span class="st-ex-amt">${fmtCredits(r.amount)}分${burn}</span>` +
+      `<span class="st-ex-amt">${fmtCredits(r.amount)}分</span>` +
       `</div>`;
   });
   html += `</div>`;

@@ -646,9 +646,9 @@ const FAKE_STATS = {
   //   ① today → 红；② tomorrow → 黄；③ later → 不上色。
   // 注意 ③ 的 risk 故意给 true：颜色必须跟 urgency 走，不跟 risk 走——
   // 此前用 risk 上色导致 7 天内的行全红（135h 后到期的也红，用户实测反馈）。
-  // 「额度格」只讲本行这一批、只讲一个时间点：`N分 · 到期前还会废 N分`（risk 行才有后半段）。
-  // today_spent / today_expired / burn_forecast 仍下发（平台表与后端判定用），
-  // 但**都不进临期行**——三者各自与 amount 不同时间轴或不同批次，同行并排必算不平。
+  // 「额度格」只显示一个数：这批还剩多少分。today_spent / today_expired /
+  // burn_forecast / risk 仍下发（平台表与后端判定用），但**都不进临期行**——
+  // 它们与「当前剩余」不同时间轴或不同批次，同行并排必被算成不平（用户四次实测）。
   expiry: [
     { uid: "4298452267967801", nickname: "健康号", group: "traework", expire_at: "2026-10-20T00:00:00+08:00", hours_left: 5.7, days_left: 0, amount: 100, today_out: 30, today_spent: 20, today_expired: 10, burn_forecast: 45, risk: true, urgency: "today" },
     { uid: "4298452267967802", nickname: "闲置号", group: "qwenwork", expire_at: "2026-10-20T08:45:21+08:00", hours_left: 4.7, days_left: 0, amount: 100, today_out: 0, today_spent: 0, today_expired: 0, burn_forecast: -1, risk: true, urgency: "today" },
@@ -732,30 +732,25 @@ check("临期剩余时长用精确小时（5.7 小时后，非 days_left 文案�
 check("到期时刻渲染为完整标准时间（含时分秒，无 T、无时区后缀）",
   stExpiry.includes("2026-10-20 00:00:00") &&
   !stExpiry.includes("2026-10-20T00:00:00"));
-// 到期前还会废 = 当前剩余额度本身（取消外推，2026-11-06 用户第三次实测否掉外推）：
-// 外推值让同行数字算不平——「91分 · 花费 2 · 到期前还会废 86分」，用户按 91−2=89 对不上，
-// 因为 91 已扣过花费、86 又扣了未来预估花费，两条时间轴。
-// 现在行内只有同一时刻的两个量：额度 amount、到期没花掉就全废 amount。
-check("到期前还会废 = 额度本身（不外推，100分）",
-  stExpiry.includes("到期前还会废 100分") &&
-  !/到期前还会废\s*-\d/.test(stExpiry));
-check("到期前还会废不再扣外推消耗（不出现 55分）", !stExpiry.includes("到期前还会废 55分"));
 // 行体切分供下方多条断言复用：`st-ex-row` 同时命中表头（`st-ex-row st-ex-head`），须滤掉。
 const exBodyRows = stExpiry.split('<div class="st-ex-row').slice(1)
   .filter((r) => !r.includes("st-ex-head"));
-// 行内不出现「花费」：它是「今日已花」，与「现在还剩 amount」不同时间轴，
-// 并排会被读成「91 里花了 2，剩 89」，而实际剩余就是 91。
-check("临期行体不渲染今日花费（避免时间轴混用）",
-  exBodyRows.every((r) => !r.includes("花费")));
-// 临期行只讲**本行这一批**：行体里绝不能出现账号全天口径的「今日已废」。
-// 曾把两者并排渲染成「300分 · 花费 0 · 今日已废 300 · 到期前还会废 300分」，
-// 同一行读成废了 600 分（用户实测反馈）。该数改由平台表「今日作废」列承接。
-// 只查数据行体：表头 title 里作为说明提到该词是允许的。
-check("临期行体不渲染账号全天口径「今日已废」",
-  exBodyRows.length > 0 && exBodyRows.every((r) => !r.includes("今日已废")));
-// risk=false 的行（按今日速度能花完）不显示「到期前还会废」——明日号 amount=115 且不 risk。
-check("risk=false 行不显示到期前还会废",
-  !exBodyRows.some((r) => r.includes("明日号") && r.includes("到期前还会废")));
+// 额度格只有一个数：这批还剩多少分（用户 2026-11-06 第四次定稿「你就显示还剩下多少分，
+// 别到期前了」）。此前三次都是往这一格里塞了不同口径/不同时刻/不同批次的数，被用户否掉：
+//  ①已耗+预计作废（差值含作废）②花费 0 + 今日已废 300 + 到期前还会废 300（账号全天口径混入）
+//  ③91分 · 花费 2 · 到期前还会废 86分（amount 已扣花费，外推又扣未来花费，两条时间轴）
+const HARD_NO = ["已耗", "花费", "已作废", "今日已废", "到期前还会废", "预计作废"];
+for (const word of HARD_NO) {
+  check(`临期行体不出现「${word}」（额度格只留剩余分）`,
+    exBodyRows.length > 0 && exBodyRows.every((r) => !r.includes(word)));
+}
+// 剩余额度必须逐行渲染成「N分」：四行 amount = 100/100/115/249。
+check("临期行体逐行渲染剩余额度（100/100/115/249分）",
+  exBodyRows.length === 4 &&
+  ["100分", "100分", "115分", "249分"].every((s, i) => exBodyRows[i].includes(s)));
+// 表头也不得再承诺预测（曾为「额度 · 到期前还会废」）。
+check("表头为「额度 · 剩余」，不再出现预测措辞",
+  stExpiry.includes("额度 · 剩余") && !stExpiry.includes("额度 · 到期前还会废"));
 
 const stModels = document.getElementById("stModels").innerHTML;
 check("Trae 系模型积分为估算（≈ 前缀）", stModels.includes("≈12.50"));
